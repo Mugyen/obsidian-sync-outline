@@ -18,6 +18,15 @@ export class OutlineSyncSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 
+		const version = new Setting(containerEl)
+			.setName("Outline Sync")
+			.setDesc(`Version ${this.plugin.manifest.version}`);
+		version.descEl.createEl("br");
+		version.descEl.createEl("a", {
+			text: "Check for the latest release",
+			href: "https://github.com/Mugyen/obsidian-sync-outline/releases/latest",
+		});
+
 		new Setting(containerEl).setName("Connection").setHeading();
 
 		new Setting(containerEl)
