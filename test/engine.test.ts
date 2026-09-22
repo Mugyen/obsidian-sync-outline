@@ -88,6 +88,12 @@ class FakeClient {
 	async deleteDocument(id: string): Promise<void> {
 		this.deletes.push(id);
 	}
+	readonly moves: { id: string; parentDocumentId?: string }[] = [];
+	async moveDocument(params: { id: string; collectionId: string; parentDocumentId?: string }): Promise<void> {
+		this.moves.push({ id: params.id, parentDocumentId: params.parentDocumentId });
+		const document = this.documents.find((candidate) => candidate.id === params.id);
+		if (document) document.parentDocumentId = params.parentDocumentId;
+	}
 	/** Simulates somebody editing in the browser. */
 	editInOutline(id: string, text: string): void {
 		const document = this.documents.find((candidate) => candidate.id === id);
@@ -671,6 +677,48 @@ await test("a teammate pulls soft breaks back out of Outline", async () => {
 
 	assert.equal(summary.pulled, 1);
 	assert.equal(bodyOf(h.app, "Wiki/Note.md"), "alpha\nbeta\ngamma", "sentinels decoded to line breaks");
+});
+
+await test("moving a note into a subfolder locally pushes the move to Outline", async () => {
+	const sub: RemoteDocument = remoteDoc("sub", "Sub", FOLDER_PLACEHOLDER_BODY);
+	const note: RemoteDocument = remoteDoc("d1", "Note", "body text");
+	const h = harness([sub, note]);
+	await h.engine.syncAll(); // Wiki/Note.md at root, Wiki/Sub/ folder present
+
+	assert.ok(h.app.vault.files.has("Wiki/Note.md"));
+
+	// User moves the note into the Sub folder (a rename to a new path).
+	const content = h.app.vault.files.get("Wiki/Note.md")!;
+	h.app.vault.files.delete("Wiki/Note.md");
+	h.app.vault.seed("Wiki/Sub/Note.md", content);
+	h.state.relocate("Wiki/Note.md", "Wiki/Sub/Note.md");
+
+	await h.engine.syncAll();
+
+	assert.ok(
+		h.client.moves.some((m) => m.id === "d1" && m.parentDocumentId === "sub"),
+		"the note is moved under the Sub placeholder in Outline",
+	);
+	assert.ok(h.app.vault.files.has("Wiki/Sub/Note.md"), "stays in the subfolder locally");
+	assert.ok(!h.app.vault.files.has("Wiki/Note.md"), "not reverted back to the root");
+});
+
+await test("a note the remote moved is still relocated locally", async () => {
+	const sub: RemoteDocument = remoteDoc("sub", "Sub", FOLDER_PLACEHOLDER_BODY);
+	const note: RemoteDocument = remoteDoc("d1", "Note", "body text");
+	const h = harness([sub, note]);
+	await h.engine.syncAll(); // Wiki/Note.md at root
+
+	// Outline re-parents the note under Sub.
+	const doc = h.client.documents.find((d) => d.id === "d1")!;
+	doc.parentDocumentId = "sub";
+	doc.updatedAt = new Date(Date.parse(doc.updatedAt) + 60_000).toISOString();
+
+	await h.engine.syncAll();
+
+	assert.ok(h.app.vault.files.has("Wiki/Sub/Note.md"), "local note follows the remote move");
+	assert.ok(!h.app.vault.files.has("Wiki/Note.md"));
+	assert.equal(h.client.moves.length, 0, "no push-back move; remote was authoritative");
 });
 
 await test("a local rename pushes the new title instead of being reverted", async () => {

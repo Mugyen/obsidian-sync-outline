@@ -158,6 +158,15 @@ export class OutlineClient {
 		await this.post("documents.delete", { id });
 	}
 
+	/** Re-parents a document (moves it to a different folder/nesting in Outline). */
+	async moveDocument(params: { id: string; collectionId: string; parentDocumentId?: string }): Promise<void> {
+		await this.post("documents.move", {
+			id: params.id,
+			collectionId: params.collectionId,
+			...(params.parentDocumentId ? { parentDocumentId: params.parentDocumentId } : {}),
+		});
+	}
+
 	async createAttachment(params: {
 		name: string;
 		contentType: string;

@@ -176,9 +176,28 @@ export class SyncEngine {
 					const localChanged = local.hash !== record.baseHash || titleChangedLocally;
 					const remoteChanged = this.remoteHasChanged(remote, record);
 
+					// The note sits in a different folder than Outline's nesting says,
+					// and Outline's parent has not moved since we agreed — so the user
+					// moved it locally. Propagate the move; never revert it.
+					const folderMovedLocally =
+						(remote.parentDocumentId ?? "") === (record.parentDocumentId ?? "") &&
+						parentFolderOf(local.path) !== parentFolderOf(desiredPath);
+
+					if (folderMovedLocally && !remoteChanged) {
+						if (doPush) {
+							if (localChanged) await this.push(record, local);
+							await this.moveRemote(record, local, remoteById, folderByCollection);
+							summary.pushed++;
+						}
+						continue;
+					}
+
 					if (!localChanged && !remoteChanged) {
-						// A pure re-nesting (remote structure moved) is a local write.
-						if (doPull && local.path !== desiredPath) await this.relocateNote(local, desiredPath, record);
+						// Relocate to match Outline only when the remote actually moved —
+						// never when the user just moved the note locally.
+						if (doPull && local.path !== desiredPath && !folderMovedLocally) {
+							await this.relocateNote(local, desiredPath, record);
+						}
 						continue;
 					}
 					if (localChanged && !remoteChanged) {
@@ -420,6 +439,32 @@ export class SyncEngine {
 		// as a remote change on the next poll and clobber the local formatting.
 		const stored = (await this.client.getDocument(record.documentId)) ?? updated;
 		this.recordAgreement(stored, local.path, local.hash);
+	}
+
+	/** Propagates a local folder move to Outline by re-parenting the document. */
+	private async moveRemote(
+		record: SyncRecord,
+		local: LocalNote,
+		remoteById: Map<string, RemoteDocument>,
+		folderByCollection: Map<string, string>,
+	): Promise<void> {
+		const parentId = await this.ensureFolderPlaceholder(
+			parentFolderOf(local.path),
+			record.collectionId,
+			remoteById,
+			folderByCollection,
+		);
+		await this.client.moveDocument({
+			id: record.documentId,
+			collectionId: record.collectionId,
+			parentDocumentId: parentId,
+		});
+		// Re-baseline against Outline's stored form at the note's new location.
+		const stored = (await this.client.getDocument(record.documentId)) ?? remoteById.get(record.documentId);
+		if (stored) {
+			remoteById.set(stored.id, stored);
+			this.recordAgreement(stored, local.path, local.hash);
+		}
 	}
 
 	private async create(

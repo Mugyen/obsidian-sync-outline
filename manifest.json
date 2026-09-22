@@ -1,7 +1,7 @@
 {
   "id": "outline-sync",
   "name": "Outline Sync",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "minAppVersion": "1.0.0",
   "description": "Two-way sync between your vault and an Outline wiki. Edit in either place; on a conflict it asks instead of overwriting.",
   "author": "Mugyen",

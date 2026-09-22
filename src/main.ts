@@ -2,7 +2,7 @@ import { Notice, Plugin, TFile, debounce, setIcon, setTooltip } from "obsidian";
 
 import { OutlineClient } from "./outline/client";
 import { SyncEngine, type Conflict, type Resolution, type SyncDirection } from "./sync/engine";
-import { isInsideFolder } from "./sync/paths";
+import { isInsideFolder, parentFolderOf } from "./sync/paths";
 import { SyncStateStore, emptyState } from "./sync/state";
 import { DEFAULT_SETTINGS, type OutlineSyncSettings, type SyncState, type SyncSummary } from "./types";
 import { ConflictModal } from "./ui/conflict-modal";
@@ -26,6 +26,8 @@ export default class OutlineSyncPlugin extends Plugin {
 	private flushDebounced: () => void = () => undefined;
 	/** Notes edited locally and waiting for the debounce to expire. */
 	private readonly pendingPushes = new Set<string>();
+	/** A folder move happened; the next flush must run a full sync to propagate it. */
+	private pendingFullSync = false;
 
 	async onload(): Promise<void> {
 		await this.loadPersisted();
@@ -204,6 +206,9 @@ export default class OutlineSyncPlugin extends Plugin {
 				if (!record) return;
 				void this.savePersisted();
 				if (!this.autoPushEnabled()) return;
+				// A move to a different folder must re-parent the document in Outline,
+				// which only the full reconcile does — request one.
+				if (parentFolderOf(oldPath) !== parentFolderOf(file.path)) this.pendingFullSync = true;
 				// The title lives in the filename, so a rename is an edit.
 				this.pendingPushes.add(file.path);
 				this.flushDebounced();
@@ -246,7 +251,8 @@ export default class OutlineSyncPlugin extends Plugin {
 		const paths = [...this.pendingPushes];
 		this.pendingPushes.clear();
 
-		let needsFullSync = false;
+		let needsFullSync = this.pendingFullSync;
+		this.pendingFullSync = false;
 		for (const path of paths) {
 			const file = this.app.vault.getFileByPath(path);
 			if (!file) continue;
