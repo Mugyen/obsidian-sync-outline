@@ -57,6 +57,9 @@ export class FakeVault {
 		this.binaries.set(path, data);
 		return this.handle(path);
 	}
+	async modifyBinary(file: TFile, data: ArrayBuffer): Promise<void> {
+		this.binaries.set(file.path, data);
+	}
 	async createFolder(path: string): Promise<void> {
 		this.folders.add(path);
 	}
@@ -73,6 +76,7 @@ export class FakeApp {
 		},
 		trashFile: async (file: TFile): Promise<void> => {
 			this.vault.files.delete(file.path);
+			this.vault.binaries.delete(file.path);
 			this.vault.trashed.push(file.path);
 		},
 	};

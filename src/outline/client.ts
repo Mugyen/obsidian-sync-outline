@@ -124,6 +124,9 @@ export class OutlineClient {
 	async getDocument(id: string): Promise<RemoteDocument | undefined> {
 		try {
 			const result = await this.post<{ data: RawDocument }>("documents.info", { id });
+			// A deleted document stays readable from Outline's trash (and an
+			// archived one from the archive); for syncing, both are gone.
+			if (result.data.deletedAt || result.data.archivedAt) return undefined;
 			return toRemote(result.data);
 		} catch (error) {
 			if (error instanceof OutlineApiError && error.status === 404) return undefined;

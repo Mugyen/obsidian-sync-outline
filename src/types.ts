@@ -35,6 +35,12 @@ export interface OutlineSyncSettings {
 	 * keep Outline documents free of the marker.
 	 */
 	convertMarkdown: boolean;
+	/**
+	 * Non-markdown file extensions (lowercase, no dot) to sync as attachments,
+	 * e.g. ["html", "pdf"]. Each becomes a downloadable "file document" in Outline.
+	 * Empty disables non-markdown sync.
+	 */
+	syncFileExtensions: string[];
 }
 
 export const DEFAULT_SETTINGS: OutlineSyncSettings = {
@@ -50,6 +56,7 @@ export const DEFAULT_SETTINGS: OutlineSyncSettings = {
 	propagateLocalDeletes: false,
 	propagateRemoteDeletes: true,
 	convertMarkdown: true,
+	syncFileExtensions: ["html"],
 };
 
 /**
@@ -79,6 +86,8 @@ export interface SyncRecord {
 	parentDocumentId?: string;
 	/** A folder placeholder: represents an Obsidian folder, has no local note. */
 	isFolder?: boolean;
+	/** A file document: wraps a non-markdown file as an Outline attachment. */
+	isFile?: boolean;
 }
 
 export interface SyncState {

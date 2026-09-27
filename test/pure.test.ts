@@ -4,8 +4,10 @@ import assert from "node:assert/strict";
 import { diffLines, withContext, countChanges } from "../src/sync/diff";
 import {
 	SOFT_BREAK_SENTINEL,
+	buildFileWrapper as buildFileWrapperFn,
 	decodeFromOutline,
 	encodeForOutline,
+	parseFileWrapper,
 	findLocalImages,
 	findOutlineAttachments,
 	hashBody,
@@ -237,6 +239,22 @@ test("a soft-break paragraph survives the full round-trip byte-for-byte", () => 
 	const original = "line one\nline two\nline three";
 	const restored = decodeFromOutline(simulateOutlineStore(encodeForOutline(original)));
 	assert.equal(restored, original);
+});
+
+test("file wrapper name is trimmed of Outline's link-text padding", () => {
+	// Outline stores our `[report.html]` as `[ report.html]`.
+	const parsed = parseFileWrapper("[ report.html](/api/attachments.redirect?id=7a24069a-bf14-4030-b0ec-5c31d1d9f5fe)\n\n<!--outline-sync:file-->");
+	assert.ok(parsed);
+	assert.equal(parsed!.name, "report.html", "leading space stripped");
+});
+
+test("file wrapper carries the exact filename, even one Outline would reformat", () => {
+	const id = "7a24069a-bf14-4030-b0ec-5c31d1d9f5fe";
+	for (const name of ["report.html", " spaced.html", 'odd "quote" name.pdf']) {
+		// Simulate Outline padding the link text; the comment is kept verbatim.
+		const stored = buildFileWrapperFn(name, id).replace(/\[([^\]]+)\]/, "[ $1]");
+		assert.deepEqual(parseFileWrapper(stored), { name, attachmentId: id });
+	}
 });
 
 test("decode canonicalises Outline markdown to Obsidian style", () => {

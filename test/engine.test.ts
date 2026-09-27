@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import type { OutlineClient } from "../src/outline/client";
 import { SyncEngine, type Conflict, type Resolution } from "../src/sync/engine";
-import { hashBody, parseNote, withFrontmatter } from "../src/sync/markdown";
+import { buildFileWrapper, hashBody, parseNote, withFrontmatter } from "../src/sync/markdown";
 import { FOLDER_MARKER, FOLDER_PLACEHOLDER_BODY } from "../src/sync/paths";
 import { SyncStateStore } from "../src/sync/state";
 import { DEFAULT_SETTINGS, type OutlineSyncSettings, type RemoteDocument } from "../src/types";
@@ -46,9 +46,11 @@ class FakeClient {
 	hideFromList(id: string): void {
 		this.hiddenFromList.add(id);
 	}
-	/** Mimics Outline merging our soft-break-marked lines into one paragraph. */
+	/** Mimics Outline's markdown serialisation: merges soft-break lines and pads link text. */
 	private storeText(text: string): string {
-		return text.replace(new RegExp("⁠\\n", "g"), "⁠ ");
+		return text
+			.replace(new RegExp("⁠\\n", "g"), "⁠ ")
+			.replace(/\[([^\]]+)\]\(\/api\/attachments/g, "[ $1](/api/attachments");
 	}
 	async updateDocument(params: { id: string; text?: string; title?: string }): Promise<RemoteDocument> {
 		this.updates.push(params);
@@ -93,6 +95,37 @@ class FakeClient {
 		this.moves.push({ id: params.id, parentDocumentId: params.parentDocumentId });
 		const document = this.documents.find((candidate) => candidate.id === params.id);
 		if (document) document.parentDocumentId = params.parentDocumentId;
+	}
+
+	// ---- attachments (for non-markdown file sync) ----
+	readonly attachments = new Map<string, ArrayBuffer>();
+	private attachmentSeq = 0;
+	async createAttachment(params: { name: string; contentType: string; size: number }): Promise<{
+		uploadUrl: string;
+		form: Record<string, string>;
+		attachment: { id: string; url: string; name: string; contentType: string; size: number };
+	}> {
+		const id = `00000000-0000-0000-0000-${String(++this.attachmentSeq).padStart(12, "0")}`;
+		return {
+			uploadUrl: "/api/files.create",
+			form: {},
+			attachment: {
+				id,
+				url: `/api/attachments.redirect?id=${id}`,
+				name: params.name,
+				contentType: params.contentType,
+				size: params.size,
+			},
+		};
+	}
+	async uploadAttachmentData(
+		upload: { attachment: { id: string } },
+		data: ArrayBuffer,
+	): Promise<void> {
+		this.attachments.set(upload.attachment.id, data);
+	}
+	async downloadAttachment(id: string): Promise<{ data: ArrayBuffer; contentType: string }> {
+		return { data: this.attachments.get(id) ?? new ArrayBuffer(0), contentType: "application/octet-stream" };
 	}
 	/** Simulates somebody editing in the browser. */
 	editInOutline(id: string, text: string): void {
@@ -785,6 +818,103 @@ await test("a note missing from the listing is NOT trashed while Outline still h
 	assert.equal(h.app.vault.trashed.includes("Wiki/Oncall.md"), false);
 	assert.equal(summary.deleted, 0, "nothing counted as deleted");
 	assert.ok(h.state.get("d1"), "the sync record is kept");
+});
+
+// ---- non-markdown file sync (attachment-wrapped file documents) ----
+
+await test("a local non-markdown file syncs as a file document", async () => {
+	const h = harness([], { syncFileExtensions: ["html"] });
+	h.app.vault.binaries.set("Wiki/report.html", new TextEncoder().encode("<h1>Report</h1>").buffer);
+
+	const summary = await h.engine.syncAll();
+
+	const created = h.client.creates.find((c) => c.title === "report.html");
+	assert.ok(created, "a file document was created");
+	assert.ok(created!.text.includes("outline-sync:file"), "it carries the file marker");
+	assert.ok(created!.text.includes("attachments.redirect"), "it links to the attachment");
+	assert.equal(h.client.attachments.size, 1, "the file was uploaded as an attachment");
+	assert.equal(summary.created, 1);
+});
+
+await test("a file document downloads the file into the vault", async () => {
+	const attId = "00000000-0000-0000-0000-000000000009";
+	const wrapper = remoteDoc("f1", "report.html", buildFileWrapper("report.html", attId));
+	const h = harness([wrapper], { syncFileExtensions: ["html"] });
+	h.client.attachments.set(attId, new TextEncoder().encode("<h1>Report</h1>").buffer);
+
+	const summary = await h.engine.syncAll();
+
+	assert.ok(h.app.vault.binaries.has("Wiki/report.html"), "the file is written locally");
+	assert.equal(
+		new TextDecoder().decode(h.app.vault.binaries.get("Wiki/report.html")),
+		"<h1>Report</h1>",
+		"bytes preserved exactly",
+	);
+	assert.equal(summary.pulled, 1);
+});
+
+await test("an unchanged file is not re-uploaded on a quiet sync", async () => {
+	const h = harness([], { syncFileExtensions: ["html"] });
+	h.app.vault.binaries.set("Wiki/report.html", new TextEncoder().encode("stable").buffer);
+	await h.engine.syncAll();
+
+	const before = h.client.attachments.size;
+	const summary = await h.engine.syncAll();
+
+	assert.equal(h.client.attachments.size, before, "no new attachment uploaded");
+	assert.equal(summary.created + summary.pushed + summary.pulled, 0, "nothing to do");
+});
+
+await test("duplicate file documents for one file are collapsed", async () => {
+	const attId = "00000000-0000-0000-0000-000000000009";
+	const w1 = remoteDoc("f1", "report.html", buildFileWrapper("report.html", attId));
+	const w2 = remoteDoc("f2", "report.html", buildFileWrapper("report.html", attId));
+	const h = harness([w1, w2], { syncFileExtensions: ["html"] });
+	h.client.attachments.set(attId, new TextEncoder().encode("x").buffer);
+
+	const summary = await h.engine.syncAll();
+
+	assert.equal(h.client.deletes.length, 1, "one of the two duplicates is deleted");
+	assert.equal(summary.deleted, 1);
+});
+
+await test("a file deleted in Outline is trashed locally when deletes propagate", async () => {
+	const h = harness([], { syncFileExtensions: ["html"] }); // propagateRemoteDeletes on by default
+	h.app.vault.binaries.set("Wiki/report.html", new TextEncoder().encode("a").buffer);
+	await h.engine.syncAll();
+	const wrapperId = h.client.documents.find((d) => d.title === "report.html")!.id;
+
+	h.client.removeFromOutline(wrapperId);
+	await h.engine.syncAll();
+
+	assert.ok(h.app.vault.trashed.includes("Wiki/report.html"), "local file sent to trash");
+	assert.equal(h.client.creates.filter((c) => c.title === "report.html").length, 1, "not re-uploaded");
+});
+
+await test("a file deleted in Outline is re-uploaded when deletes don't propagate", async () => {
+	const h = harness([], { syncFileExtensions: ["html"], propagateRemoteDeletes: false });
+	h.app.vault.binaries.set("Wiki/report.html", new TextEncoder().encode("a").buffer);
+	await h.engine.syncAll();
+	const wrapperId = h.client.documents.find((d) => d.title === "report.html")!.id;
+
+	h.client.removeFromOutline(wrapperId);
+	await h.engine.syncAll();
+
+	assert.ok(h.app.vault.binaries.has("Wiki/report.html"), "local file kept");
+	assert.equal(h.client.creates.filter((c) => c.title === "report.html").length, 2, "uploaded again, fresh");
+	const third = await h.engine.syncAll();
+	assert.equal(third.created, 0, "and then stays in sync");
+});
+
+await test("only allow-listed extensions sync; others are ignored", async () => {
+	const h = harness([], { syncFileExtensions: ["html"] });
+	h.app.vault.binaries.set("Wiki/report.html", new TextEncoder().encode("a").buffer);
+	h.app.vault.binaries.set("Wiki/photo.png", new TextEncoder().encode("b").buffer);
+
+	await h.engine.syncAll();
+
+	assert.ok(h.client.creates.some((c) => c.title === "report.html"), "html synced");
+	assert.ok(!h.client.creates.some((c) => c.title === "photo.png"), "png ignored (not allow-listed)");
 });
 
 for (const failure of failures) console.error(failure);

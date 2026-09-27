@@ -108,6 +108,61 @@ export function hashBody(body: string): string {
 }
 
 /**
+ * A non-markdown file (report.html, a PDF, …) can't be an Outline document, so
+ * it is stored as an attachment wrapped in a small "file document": the body is
+ * a download link to the attachment plus a marker so any machine recognises it
+ * and rebuilds the local file instead of treating it as a note.
+ */
+export const FILE_MARKER = "outline-sync:file";
+
+export function buildFileWrapper(name: string, attachmentId: string): string {
+	// The link text is for people; Outline reformats it (it pads `[x]` to
+	// `[ x]`). The exact filename rides in the marker comment, which Outline
+	// stores verbatim.
+	return (
+		`[${name}](/api/attachments.redirect?id=${attachmentId})\n\n` +
+		`<!--${FILE_MARKER} name="${encodeURIComponent(name)}"-->`
+	);
+}
+
+export function isFileWrapper(text: string): boolean {
+	return text.includes(FILE_MARKER);
+}
+
+/** Extracts the filename and attachment id from a file-wrapper document. */
+export function parseFileWrapper(text: string): { name: string; attachmentId: string } | null {
+	if (!isFileWrapper(text)) return null;
+	const match = /!?\[([^\]]+)\]\(\/api\/attachments\.redirect\?id=([a-f0-9-]{36})/i.exec(text);
+	if (!match) return null;
+	const exact = new RegExp(`<!--${FILE_MARKER} name="([^"]*)"-->`).exec(text);
+	if (exact) {
+		try {
+			return { name: decodeURIComponent(exact[1]), attachmentId: match[2] };
+		} catch {
+			// malformed encoding: fall through to the link text
+		}
+	}
+	// Wrappers from 0.6.0 carry no name attribute. Outline pads link text
+	// (`[ report.html]`), so trim it.
+	return { name: match[1].trim(), attachmentId: match[2] };
+}
+
+/** FNV-1a over raw bytes, matching hashBody's scheme, for binary change detection. */
+export function hashBytes(data: ArrayBuffer): string {
+	const bytes = new Uint8Array(data);
+	let high = 0xcbf2_9ce4;
+	let low = 0x8422_2325;
+	for (let i = 0; i < bytes.length; i++) {
+		low ^= bytes[i];
+		const lowMultiplied = low * 0x1b3;
+		const highMultiplied = high * 0x1b3 + Math.floor(lowMultiplied / 0x1_0000_0000);
+		low = lowMultiplied >>> 0;
+		high = highMultiplied >>> 0;
+	}
+	return high.toString(16).padStart(8, "0") + low.toString(16).padStart(8, "0");
+}
+
+/**
  * Outline stores rich text and regenerates markdown on read, so a push→pull
  * round-trip is lossy. Two things bridge the gap:
  *

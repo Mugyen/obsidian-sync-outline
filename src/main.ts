@@ -28,6 +28,8 @@ export default class OutlineSyncPlugin extends Plugin {
 	private readonly pendingPushes = new Set<string>();
 	/** A folder move happened; the next flush must run a full sync to propagate it. */
 	private pendingFullSync = false;
+	/** Serialises syncs so overlapping runs can't create duplicate documents. */
+	private syncing = false;
 
 	async onload(): Promise<void> {
 		await this.loadPersisted();
@@ -119,8 +121,12 @@ export default class OutlineSyncPlugin extends Plugin {
 			if (!quiet) new Notice("Outline Sync: set the URL, token and at least one folder in settings first.");
 			return;
 		}
+		// A fresh engine is built per call, so its own isRunning flag can't guard
+		// against overlapping syncs (button + poll + file-event). Serialise here,
+		// or two runs create duplicate documents for the same new file.
+		if (this.syncing) return;
+		this.syncing = true;
 		const engine = this.getEngine();
-		if (engine.isRunning) return;
 
 		const verb = direction === "pull" ? "pulling" : direction === "push" ? "pushing" : "syncing";
 		this.setBusy(true);
@@ -133,6 +139,7 @@ export default class OutlineSyncPlugin extends Plugin {
 			new Notice(`Outline sync failed: ${String(error)}`, 10_000);
 			return;
 		} finally {
+			this.syncing = false;
 			this.setBusy(false);
 		}
 		const done = direction === "pull" ? "pulled" : direction === "push" ? "pushed" : "synced";
@@ -140,7 +147,7 @@ export default class OutlineSyncPlugin extends Plugin {
 	}
 
 	private async pushFile(file: TFile): Promise<void> {
-		if (!this.isConfigured()) return;
+		if (!this.isConfigured() || this.syncing) return;
 		try {
 			const outcome = await this.getEngine().pushNote(file);
 			if (outcome === "pushed") this.setStatus(`Outline: pushed ${timeOfDay()}`);
@@ -182,19 +189,29 @@ export default class OutlineSyncPlugin extends Plugin {
 
 		this.registerEvent(
 			this.app.vault.on("modify", (file) => {
-				if (!(file instanceof TFile) || file.extension !== "md") return;
-				if (!this.isTracked(file.path) || !this.autoPushEnabled()) return;
-				void this.queuePush(file, this.flushDebounced);
+				if (!(file instanceof TFile) || !this.autoPushEnabled()) return;
+				if (file.extension === "md") {
+					if (this.isTracked(file.path)) void this.queuePush(file, this.flushDebounced);
+				} else if (this.isSyncableFile(file)) {
+					// A non-markdown file change needs the full file-sync pass.
+					this.pendingFullSync = true;
+					this.flushDebounced();
+				}
 			}),
 		);
 
 		this.registerEvent(
 			this.app.vault.on("create", (file) => {
-				if (!(file instanceof TFile) || file.extension !== "md") return;
-				if (!this.isTracked(file.path) || !this.settings.createRemoteForNewFiles) return;
-				if (!this.autoPushEnabled()) return;
-				this.pendingPushes.add(file.path);
-				this.flushDebounced();
+				if (!(file instanceof TFile) || !this.autoPushEnabled()) return;
+				if (file.extension === "md") {
+					if (this.isTracked(file.path) && this.settings.createRemoteForNewFiles) {
+						this.pendingPushes.add(file.path);
+						this.flushDebounced();
+					}
+				} else if (this.isSyncableFile(file)) {
+					this.pendingFullSync = true;
+					this.flushDebounced();
+				}
 			}),
 		);
 
@@ -263,6 +280,15 @@ export default class OutlineSyncPlugin extends Plugin {
 			await this.pushFile(file);
 		}
 		if (needsFullSync) await this.syncNow(true);
+	}
+
+	/** A non-markdown file in a mapped folder whose extension is allow-listed. */
+	private isSyncableFile(file: TFile): boolean {
+		const ext = (file.extension ?? file.path.split(".").pop() ?? "").toLowerCase();
+		return (
+			this.settings.syncFileExtensions.some((e) => e.toLowerCase().replace(/^\./, "") === ext) &&
+			this.isTracked(file.path)
+		);
 	}
 
 	private isTracked(path: string): boolean {

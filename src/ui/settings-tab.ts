@@ -286,6 +286,24 @@ export class OutlineSyncSettingTab extends PluginSettingTab {
 				}),
 			);
 
+		new Setting(containerEl)
+			.setName("Sync these file types too")
+			.setDesc(
+				"Comma-separated extensions of non-markdown files to sync (e.g. html, pdf, csv). Each syncs as a downloadable attachment in Outline. Leave blank to sync only Markdown.",
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("html, pdf")
+					.setValue(this.plugin.settings.syncFileExtensions.join(", "))
+					.onChange(async (value) => {
+						this.plugin.settings.syncFileExtensions = value
+							.split(",")
+							.map((e) => e.trim().toLowerCase().replace(/^\./, ""))
+							.filter(Boolean);
+						await this.plugin.saveSettings();
+					}),
+			);
+
 		new Setting(containerEl).setName("Maintenance").setHeading();
 
 		new Setting(containerEl)

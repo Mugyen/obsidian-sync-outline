@@ -2,6 +2,7 @@ import { normalizePath, TFile, type App } from "obsidian";
 
 import { OutlineApiError, OutlineClient } from "../outline/client";
 import type {
+	CollectionMapping,
 	ConflictPolicy,
 	OutlineSyncSettings,
 	RemoteDocument,
@@ -9,6 +10,7 @@ import type {
 	SyncSummary,
 } from "../types";
 import {
+	buildFileWrapper,
 	contentTypeForPath,
 	decodeFromOutline,
 	encodeForOutline,
@@ -16,6 +18,9 @@ import {
 	findLocalImages,
 	findOutlineAttachments,
 	hashBody,
+	hashBytes,
+	isFileWrapper,
+	parseFileWrapper,
 	parseNote,
 	rewriteAttachmentsToLocal,
 	rewriteImageToOutline,
@@ -143,6 +148,9 @@ export class SyncEngine {
 					continue;
 				}
 
+				// A file document wraps a non-markdown file; handled by syncFiles.
+				if (isFileWrapper(remote.text)) continue;
+
 				const record = this.state.get(remote.id);
 				const local = localById.get(remote.id) ?? (record ? this.noteAt(localNotes, record.path) : undefined);
 
@@ -255,6 +263,9 @@ export class SyncEngine {
 					summary.errors.push(describe(error, record.title));
 				}
 			}
+
+			// Non-markdown files sync as attachment-wrapped "file documents".
+			await this.syncFiles(mappings, remoteById, folderByCollection, summary, doPull, doPush);
 
 			if (conflicts.length > 0) {
 				summary.conflicts = conflicts.length;
@@ -439,6 +450,212 @@ export class SyncEngine {
 		// as a remote change on the next poll and clobber the local formatting.
 		const stored = (await this.client.getDocument(record.documentId)) ?? updated;
 		this.recordAgreement(stored, local.path, local.hash);
+	}
+
+	/** Syncs non-markdown files as attachment-wrapped "file documents". */
+	private async syncFiles(
+		mappings: CollectionMapping[],
+		remoteById: Map<string, RemoteDocument>,
+		folderByCollection: Map<string, string>,
+		summary: SyncSummary,
+		doPull: boolean,
+		doPush: boolean,
+	): Promise<void> {
+		const exts = new Set(
+			this.settings.syncFileExtensions.map((e) => e.toLowerCase().replace(/^\./, "")).filter(Boolean),
+		);
+		if (exts.size === 0) return;
+
+		// Remote file documents, keyed by the local path they map to. Overlapping
+		// syncs used to create several documents for one file; collapse them and
+		// delete the extras, preferring the one a record already tracks.
+		const remoteFiles = new Map<string, RemoteDocument>();
+		const duplicates: RemoteDocument[] = [];
+		for (const remote of remoteById.values()) {
+			const folder = folderByCollection.get(remote.collectionId);
+			if (!folder) continue;
+			const parsed = parseFileWrapper(remote.text);
+			if (!parsed) continue;
+			const path = this.fileWrapperPath(remote, remoteById, folder, parsed.name);
+			const existing = remoteFiles.get(path);
+			if (!existing) {
+				remoteFiles.set(path, remote);
+				continue;
+			}
+			if (remote.id === this.state.byPath(path)?.documentId) {
+				duplicates.push(existing);
+				remoteFiles.set(path, remote);
+			} else {
+				duplicates.push(remote);
+			}
+		}
+		if (doPush) {
+			for (const dup of duplicates) {
+				try {
+					await this.client.deleteDocument(dup.id);
+					remoteById.delete(dup.id);
+					this.state.remove(dup.id);
+					summary.deleted++;
+				} catch (error) {
+					summary.errors.push(describe(error, dup.title));
+				}
+			}
+		}
+
+		const localFiles = await this.scanFiles(
+			mappings.map((mapping) => mapping.folder),
+			exts,
+		);
+		const seen = new Set<string>();
+
+		for (const local of localFiles) {
+			seen.add(local.path);
+			const record = this.state.byPath(local.path);
+			const remote = remoteFiles.get(local.path);
+			try {
+				if (!remote) {
+					// New local file. (If its wrapper is gone from Outline, the
+					// deletion sweep handles it — don't recreate here.)
+					const wrapperDeleted = record?.isFile && !remoteById.has(record.documentId);
+					if (doPush && !wrapperDeleted) {
+						await this.createFile(local, mappings, remoteById, folderByCollection);
+						summary.created++;
+					}
+					continue;
+				}
+				const localChanged = !record || local.hash !== record.baseHash;
+				const remoteChanged = !record || hashBody(remote.text) !== record.baseRemoteHash;
+				if (localChanged && doPush) {
+					if (remoteChanged) {
+						this.hooks.onError(
+							`${parseFileWrapper(remote.text)?.name ?? local.path}: changed in both places; kept your local file.`,
+						);
+					}
+					await this.pushFileWrapper(local, remote);
+					summary.pushed++;
+				} else if (remoteChanged && doPull) {
+					await this.pullFile(remote, local.path);
+					summary.pulled++;
+				}
+			} catch (error) {
+				summary.errors.push(describe(error, local.path));
+			}
+		}
+
+		// File documents this vault has never downloaded.
+		if (doPull) {
+			for (const [localPath, remote] of remoteFiles) {
+				if (seen.has(localPath) || this.app.vault.getAbstractFileByPath(normalizePath(localPath))) continue;
+				try {
+					await this.pullFile(remote, localPath);
+					summary.pulled++;
+				} catch (error) {
+					summary.errors.push(describe(error, remote.title));
+				}
+			}
+		}
+	}
+
+	private fileWrapperPath(
+		remote: RemoteDocument,
+		remoteById: Map<string, RemoteDocument>,
+		rootFolder: string,
+		name: string,
+	): string {
+		const folder = parentFolderOf(pathForDocument(remote, remoteById, rootFolder));
+		return folder ? `${folder}/${name}` : name;
+	}
+
+	private async scanFiles(
+		folders: string[],
+		exts: Set<string>,
+	): Promise<{ file: TFile; path: string; hash: string }[]> {
+		const out: { file: TFile; path: string; hash: string }[] = [];
+		for (const file of this.app.vault.getFiles()) {
+			const ext = (file.path.split(".").pop() ?? "").toLowerCase();
+			if (!exts.has(ext)) continue;
+			if (!folders.some((folder) => isInsideFolder(file.path, folder))) continue;
+			const data = await this.app.vault.readBinary(file);
+			out.push({ file, path: file.path, hash: hashBytes(data) });
+		}
+		return out;
+	}
+
+	private async uploadFileAttachment(file: TFile, name: string): Promise<string> {
+		const data = await this.app.vault.readBinary(file);
+		const contentType = contentTypeForPath(name);
+		const upload = await this.client.createAttachment({ name, contentType, size: data.byteLength });
+		await this.client.uploadAttachmentData(upload, data, name, contentType);
+		return upload.attachment.id;
+	}
+
+	private async createFile(
+		local: { file: TFile; path: string; hash: string },
+		mappings: CollectionMapping[],
+		remoteById: Map<string, RemoteDocument>,
+		folderByCollection: Map<string, string>,
+	): Promise<void> {
+		const mapping = mappings.find((candidate) => isInsideFolder(local.path, candidate.folder));
+		if (!mapping) return;
+		const name = local.path.split("/").pop() ?? local.path;
+		const attachmentId = await this.uploadFileAttachment(local.file, name);
+		const parentDocumentId = await this.ensureFolderPlaceholder(
+			parentFolderOf(local.path),
+			mapping.collectionId,
+			remoteById,
+			folderByCollection,
+		);
+		const created = await this.client.createDocument({
+			title: name,
+			text: buildFileWrapper(name, attachmentId),
+			collectionId: mapping.collectionId,
+			parentDocumentId,
+		});
+		const stored = (await this.client.getDocument(created.id)) ?? created;
+		remoteById.set(stored.id, stored);
+		this.recordFileAgreement(stored, local.path, local.hash);
+	}
+
+	private async pushFileWrapper(
+		local: { file: TFile; path: string; hash: string },
+		remote: RemoteDocument,
+	): Promise<void> {
+		const name = local.path.split("/").pop() ?? local.path;
+		const attachmentId = await this.uploadFileAttachment(local.file, name);
+		const updated = await this.client.updateDocument({ id: remote.id, text: buildFileWrapper(name, attachmentId) });
+		const stored = (await this.client.getDocument(remote.id)) ?? updated;
+		this.recordFileAgreement(stored, local.path, local.hash);
+	}
+
+	private async pullFile(remote: RemoteDocument, localPath: string): Promise<void> {
+		const parsed = parseFileWrapper(remote.text);
+		if (!parsed) return;
+		const { data } = await this.client.downloadAttachment(parsed.attachmentId);
+		await this.ensureFolder(parentFolderOf(localPath));
+		await this.writeBinary(localPath, data);
+		this.recordFileAgreement(remote, localPath, hashBytes(data));
+	}
+
+	private async writeBinary(path: string, data: ArrayBuffer): Promise<void> {
+		const normalized = normalizePath(path);
+		const existing = this.app.vault.getFileByPath(normalized);
+		if (existing) await this.app.vault.modifyBinary(existing, data);
+		else await this.app.vault.createBinary(normalized, data);
+	}
+
+	private recordFileAgreement(remote: RemoteDocument, path: string, bytesHash: string): void {
+		this.state.set({
+			documentId: remote.id,
+			collectionId: remote.collectionId,
+			path,
+			title: remote.title,
+			baseRevision: remote.revision,
+			baseHash: bytesHash,
+			baseRemoteHash: hashBody(remote.text),
+			baseUpdatedAt: remote.updatedAt,
+			parentDocumentId: remote.parentDocumentId,
+			isFile: true,
+		});
 	}
 
 	/** Propagates a local folder move to Outline by re-parenting the document. */
