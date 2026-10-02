@@ -3,7 +3,7 @@ import { Notice, Plugin, TFile, debounce, setIcon, setTooltip } from "obsidian";
 import { OutlineClient } from "./outline/client";
 import { SyncEngine, type Conflict, type Resolution, type SyncDirection } from "./sync/engine";
 import { isInsideFolder, parentFolderOf } from "./sync/paths";
-import { isOutlineSuppressed, parseNote, withFrontmatter } from "./sync/markdown";
+import { isOutlineSuppressed, parseNote, setFrontmatterScalar } from "./sync/markdown";
 import { SyncStateStore, emptyState } from "./sync/state";
 import { DEFAULT_SETTINGS, type OutlineSyncSettings, type SyncState, type SyncSummary } from "./types";
 import { ConflictModal } from "./ui/conflict-modal";
@@ -123,7 +123,7 @@ export default class OutlineSyncPlugin extends Plugin {
 			if ("outlineSuppressed" in parseNote(content).frontmatter) continue;
 
 			this.backfillWrites.add(file.path);
-			await this.app.vault.modify(file, withFrontmatter(content, { outlineSuppressed: false }));
+			await this.app.vault.modify(file, setFrontmatterScalar(content, "outlineSuppressed", false));
 		}
 	}
 
@@ -206,14 +206,12 @@ export default class OutlineSyncPlugin extends Plugin {
 		const currentlySuppressed = isOutlineSuppressed(parsed.frontmatter);
 		const nextSuppressed = !currentlySuppressed;
 
-		const updates: Record<string, unknown> = { outlineSuppressed: nextSuppressed };
-
-		// Stamp last sync time when we are enabling suppression on a previously synced note
-		if (!currentlySuppressed && parsed.frontmatter.outlineId) {
-			updates.outlineLastsync = new Date().toISOString();
+		// Last agreement with Outline, not the moment the box was checked.
+		let updated = setFrontmatterScalar(content, "outlineSuppressed", nextSuppressed);
+		if (!currentlySuppressed) {
+			const agreedAt = this.state.byPath(file.path)?.baseUpdatedAt;
+			if (agreedAt) updated = setFrontmatterScalar(updated, "outlineLastsync", agreedAt);
 		}
-
-		const updated = withFrontmatter(content, updates);
 		await this.app.vault.modify(file, updated);
 		new Notice(
 			currentlySuppressed
@@ -242,9 +240,7 @@ export default class OutlineSyncPlugin extends Plugin {
 		// carries outlineId and gets an unchecked box from writeNote.
 		if ("outlineSuppressed" in parsed.frontmatter) return;
 
-		const updated = withFrontmatter(content, {
-			outlineSuppressed: Boolean(mapping.suppressByDefault),
-		});
+		const updated = setFrontmatterScalar(content, "outlineSuppressed", Boolean(mapping.suppressByDefault));
 		await this.app.vault.modify(file, updated);
 	}
 

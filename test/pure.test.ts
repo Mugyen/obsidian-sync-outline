@@ -11,10 +11,12 @@ import {
 	findLocalImages,
 	findOutlineAttachments,
 	hashBody,
+	isOutlineSuppressed,
 	normalizeBody,
 	parseNote,
 	rewriteAttachmentsToLocal,
 	rewriteImageToOutline,
+	setFrontmatterScalar,
 	withFrontmatter,
 } from "../src/sync/markdown";
 import { pathForDocument, safeFileName, titleFromPath, withSuffix } from "../src/sync/paths";
@@ -65,6 +67,24 @@ test("frontmatter round-trips without drift", () => {
 	const once = withFrontmatter("Body\n", { outlineId: "d1" });
 	const twice = withFrontmatter(once, { outlineId: "d1" });
 	assert.equal(once, twice);
+});
+
+test("inserts a checkbox without rewriting the rest of the block", () => {
+	const original = "---\ntags:\n  - research\naliases:\n  - Foo\n---\nBody\n";
+	const updated = setFrontmatterScalar(original, "outlineSuppressed", false);
+	assert.ok(updated.includes("tags:\n  - research\n"));
+	assert.ok(updated.includes("aliases:\n  - Foo\n"));
+	assert.ok(updated.includes("outlineSuppressed: false\n"));
+	assert.equal(parseNote(updated).body, "Body\n");
+	assert.equal(isOutlineSuppressed(parseNote(updated).frontmatter), false);
+});
+
+test("updates an existing checkbox line in place", () => {
+	const original = "---\ntags:\n  - research\noutlineSuppressed: false\n---\nBody\n";
+	const updated = setFrontmatterScalar(original, "outlineSuppressed", true);
+	assert.ok(updated.includes("tags:\n  - research\n"));
+	assert.ok(updated.includes("outlineSuppressed: true\n"));
+	assert.equal(isOutlineSuppressed(parseNote(updated).frontmatter), true);
 });
 
 // ---------- hashing ----------

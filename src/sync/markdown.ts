@@ -19,6 +19,38 @@ export function isOutlineSuppressed(frontmatter: Record<string, unknown>): boole
 	return false;
 }
 
+/**
+ * Sets one frontmatter scalar without rewriting the rest of the block.
+ * Unknown lines stay verbatim, so a tags list or Dataview block survives.
+ * Pass undefined to remove the key.
+ */
+export function setFrontmatterScalar(
+	content: string,
+	key: string,
+	value: boolean | string | undefined,
+): string {
+	const parsed = parseNote(content);
+	const formatted = value === undefined ? undefined : formatScalar(value);
+	const newline = parsed.rawFrontmatter.includes("\r\n") ? "\r\n" : "\n";
+
+	if (!parsed.rawFrontmatter) {
+		if (formatted === undefined) return content;
+		return `---${newline}${key}: ${formatted}${newline}---${newline}${parsed.body}`;
+	}
+
+	const inner = parsed.rawFrontmatter.replace(/^---\r?\n/, "").replace(/\r?\n---\r?\n?$/, "");
+	const keyLine = new RegExp(`^${escapeRegExp(key)}\\s*:`);
+	let found = false;
+	const next = inner.split(/\r?\n/).flatMap((line) => {
+		if (!keyLine.test(line)) return [line];
+		found = true;
+		return formatted === undefined ? [] : [`${key}: ${formatted}`];
+	});
+	if (!found && formatted !== undefined) next.push(`${key}: ${formatted}`);
+	if (next.length === 0 || next.every((line) => line.trim() === "")) return parsed.body;
+	return `---${newline}${next.join(newline)}${newline}---${newline}${parsed.body}`;
+}
+
 export interface ParsedNote {
 	frontmatter: OutlineFrontmatter;
 	/** Note content with the frontmatter block removed. */

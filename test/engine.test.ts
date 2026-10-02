@@ -917,5 +917,65 @@ await test("only allow-listed extensions sync; others are ignored", async () => 
 	assert.ok(!h.client.creates.some((c) => c.title === "photo.png"), "png ignored (not allow-listed)");
 });
 
+await test("a suppressed synced note is not pulled back or overwritten", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation details")]);
+	await h.engine.syncAll();
+
+	const kept = withFrontmatter("Rotation details\n\nLocal only", {
+		outlineId: "d1",
+		outlineSuppressed: true,
+	});
+	h.app.vault.seed("Wiki/Oncall.md", kept);
+	h.client.editInOutline("d1", "Rotation details\n\nFrom Outline");
+	const summary = await h.engine.syncAll();
+
+	assert.equal(summary.pulled, 0);
+	assert.equal(h.client.updates.length, 0);
+	assert.equal(h.app.vault.files.get("Wiki/Oncall.md"), kept);
+	assert.equal(h.app.vault.trashed.length, 0);
+});
+
+await test("a suppressed synced note is not pushed", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation details")]);
+	await h.engine.syncAll();
+	const file = h.app.vault.getFileByPath("Wiki/Oncall.md");
+	assert.ok(file);
+	h.app.vault.seed(
+		"Wiki/Oncall.md",
+		withFrontmatter("Rotation details\n\nLocal only", { outlineId: "d1", outlineSuppressed: true }),
+	);
+
+	const outcome = await h.engine.pushNote(file!);
+	assert.equal(outcome, "skipped");
+	assert.equal(h.client.updates.length, 0);
+});
+
+await test("a new suppressed note is not created in Outline", async () => {
+	const h = harness([]);
+	h.app.vault.seed("Wiki/Private.md", withFrontmatter("Stay local", { outlineSuppressed: true }));
+
+	const summary = await h.engine.syncAll();
+
+	assert.equal(summary.created, 0);
+	assert.equal(h.client.creates.length, 0);
+	assert.equal(h.app.vault.files.get("Wiki/Private.md")?.includes("Stay local"), true);
+});
+
+await test("deleting the remote copy does not trash a suppressed note", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation details")]);
+	await h.engine.syncAll();
+	h.app.vault.seed(
+		"Wiki/Oncall.md",
+		withFrontmatter("Rotation details", { outlineId: "d1", outlineSuppressed: true }),
+	);
+
+	h.client.removeFromOutline("d1");
+	const summary = await h.engine.syncAll();
+
+	assert.equal(summary.deleted, 0);
+	assert.ok(h.app.vault.files.has("Wiki/Oncall.md"));
+	assert.equal(h.app.vault.trashed.length, 0);
+});
+
 for (const failure of failures) console.error(failure);
 console.log(`${passed} passed, ${failures.length} failed`);

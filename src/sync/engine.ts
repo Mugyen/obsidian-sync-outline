@@ -67,6 +67,8 @@ interface LocalNote {
 	body: string;
 	outlineId?: string;
 	hash: string;
+	/** Present so a suppressed note is not mistaken for a local deletion. */
+	suppressed: boolean;
 }
 
 export class SyncEngine {
@@ -154,6 +156,9 @@ export class SyncEngine {
 
 				const record = this.state.get(remote.id);
 				const local = localById.get(remote.id) ?? (record ? this.noteAt(localNotes, record.path) : undefined);
+				// A suppressed note is still here. Skipping it would look like a
+				// local delete and the next pull would overwrite it.
+				if (local?.suppressed) continue;
 
 				try {
 					if (!local) {
@@ -230,7 +235,7 @@ export class SyncEngine {
 			// Local notes Outline has never seen. Creating them is a push.
 			if (doPush && this.settings.createRemoteForNewFiles) {
 				for (const note of localNotes) {
-					if (note.outlineId) continue;
+					if (note.outlineId || note.suppressed) continue;
 					const mapping = mappings.find((candidate) => isInsideFolder(note.path, candidate.folder));
 					if (!mapping) continue;
 					try {
@@ -253,6 +258,7 @@ export class SyncEngine {
 					this.state.remove(record.documentId);
 					continue;
 				}
+				if (await this.isSuppressedPath(record.path)) continue;
 				try {
 					// Absent from the listing is not proof of deletion — a partial
 					// page or an unexpected server-side filter would otherwise trash
@@ -294,16 +300,19 @@ export class SyncEngine {
 	 * point is to refuse rather than overwrite when Outline has moved on.
 	 */
 	async pushNote(file: TFile): Promise<"pushed" | "conflict" | "skipped"> {
+		const content = await this.app.vault.read(file);
+		if (isOutlineSuppressed(parseNote(content).frontmatter)) return "skipped";
+
 		const record = this.state.byPath(file.path);
 		if (!record) return "skipped";
 
-		const content = await this.app.vault.read(file);
 		const local: LocalNote = {
 			file,
 			path: file.path,
 			body: parseNote(content).body,
 			outlineId: record.documentId,
 			hash: hashBody(parseNote(content).body),
+			suppressed: false,
 		};
 		if (local.hash === record.baseHash) return "skipped";
 
@@ -371,6 +380,7 @@ export class SyncEngine {
 					body: parseNote(content).body,
 					outlineId: conflict.record.documentId,
 					hash: hashBody(parseNote(content).body),
+					suppressed: false,
 				};
 				// Adopt the current remote revision as the base so the write is
 				// accepted rather than rejected as stale a second time.
@@ -393,6 +403,7 @@ export class SyncEngine {
 					body: parseNote(content).body,
 					outlineId: conflict.record.documentId,
 					hash: hashBody(parseNote(content).body),
+					suppressed: false,
 				};
 				await this.push({ ...conflict.record, baseRevision: conflict.remote.revision }, local);
 				return;
@@ -881,7 +892,6 @@ export class SyncEngine {
 			if (!folders.some((folder) => isInsideFolder(file.path, folder))) continue;
 			const content = await this.app.vault.read(file);
 			const parsed = parseNote(content);
-			if (isOutlineSuppressed(parsed.frontmatter)) continue;
 			const outlineId = typeof parsed.frontmatter.outlineId === "string" ? parsed.frontmatter.outlineId : undefined;
 			notes.push({
 				file,
@@ -889,6 +899,7 @@ export class SyncEngine {
 				body: parsed.body,
 				outlineId,
 				hash: hashBody(parsed.body),
+				suppressed: isOutlineSuppressed(parsed.frontmatter),
 			});
 		}
 		return notes;
@@ -896,6 +907,12 @@ export class SyncEngine {
 
 	private noteAt(notes: LocalNote[], path: string): LocalNote | undefined {
 		return notes.find((note) => note.path === path);
+	}
+
+	private async isSuppressedPath(path: string): Promise<boolean> {
+		const file = this.app.vault.getFileByPath(path);
+		if (!file) return false;
+		return isOutlineSuppressed(parseNote(await this.app.vault.read(file)).frontmatter);
 	}
 
 	private noteMtime(path: string): number {
