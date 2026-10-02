@@ -25,9 +25,24 @@ Then enable **Outline Sync** under Settings → Community plugins (Restricted Mo
 
 1. **Get a token.** In Outline: **Settings → API → New API key**. It acts as you and inherits your collection permissions, so everyone uses their own. Never paste one into a repo or chat.
 2. **Connect.** Obsidian → **Settings → Outline Sync** → paste your instance URL (e.g. `https://outline.example.com`, no `/api` suffix) and token → **Connect**. It reports your name and lists collections.
-3. **Map collections.** Toggle on each collection you want and name the vault folder it mirrors into.
+3. **Map collections.** Each collection has an **Enable** toggle. Turn it on, then open the caret for **Local folder** (where the notes live) and **Local files always sync** (whether new notes in that folder sync by default).
 
 Because each person authenticates as themselves, every vault mirrors exactly what that person can already see in Outline.
+
+## Leaving a note out of sync
+
+A mapped folder syncs every note in it unless that note opts out. The opt-out is a checkbox property, `outlineSuppressed`, in the note's frontmatter.
+
+- **Unchecked** (`false`): the note syncs.
+- **Checked** (`true`): the note is left alone. It is not pushed, not pulled over, and not created in Outline. If the Outline document later disappears, the local note is not trashed.
+
+You do not have to add the property yourself.
+
+- A new note in a mapped folder gets the checkbox immediately. Whether it starts checked depends on **Local files always sync** for that folder. On means new notes sync unless you check the box. Off means new notes stay local until you uncheck it.
+- A note created by a pull (it already exists in Outline) gets the box unchecked.
+- The first time this version runs, notes already in a mapped folder that lack the property get an unchecked box, so nothing that was already syncing suddenly stops. The folder default applies only to notes created after that.
+
+Toggle it from the note's properties, or with the command **Toggle suppression for the active note**. Checking the box on a note that has already synced also writes `outlineLastsync`, the time local and Outline last agreed, so you can see when it dropped out. Unchecking the box does not remove the property. The note rejoins sync on the next run.
 
 ## On disk
 
@@ -43,13 +58,14 @@ Vault/
     1b9a2c3d-….png              ← images pulled from Outline
 ```
 
-Documents are identified by an `outlineId` in frontmatter, so renaming or moving a note in Obsidian doesn't break the link — a rename retitles the document in Outline.
+Documents are identified by an `outlineId` in frontmatter, so renaming or moving a note in Obsidian doesn't break the link. A rename retitles the document in Outline. `outlineSuppressed` is the per-note opt-out described above. `outlineLastsync` is set only when a previously synced note is suppressed.
 
 ## Settings worth knowing
 
 | Setting | What it does |
 | --- | --- |
 | **Check Outline every** | Poll interval for other people's edits. Your own local edits don't wait for this — they push a few seconds after you stop typing. |
+| **Local files always sync** | Per mapped folder, under the caret. On: new notes sync unless you check `outlineSuppressed`. Off: new notes start suppressed. |
 | **When both sides changed** | Conflict policy. Leave on **Ask me** unless you have a reason. |
 | **Delete Outline document when the note is deleted** | Off by default. With it off, deleting a note locally just re-downloads it next sync (safe). On, it removes the doc for the whole team. |
 
