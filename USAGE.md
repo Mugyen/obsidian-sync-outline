@@ -34,7 +34,7 @@ Because each person authenticates as themselves, every vault mirrors exactly wha
 A mapped folder syncs every note in it unless that note opts out. The opt-out is a checkbox property, `outlineSuppressed`, in the note's frontmatter.
 
 - **Unchecked** (`false`): the note syncs.
-- **Checked** (`true`): the note is left alone. It is not pushed, not pulled over, and not created in Outline. If the Outline document later disappears, the local note is not trashed.
+- **Checked** (`true`): the note is left alone. It is not pushed, not pulled over, and not created in Outline. Deleting the note locally does not delete the Outline document, even if **Delete Outline document when the note is deleted** is on. If someone else deletes that document in Outline, the local note is not trashed or overwritten. Unchecking the box lets the next sync see that the document is gone.
 
 You do not have to add the property yourself.
 

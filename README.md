@@ -16,6 +16,7 @@ Teammate edits it in Outline  ──┘
 - 🗂️ **Nesting preserved.** Collections become folders; child documents become `Parent/Child.md`.
 - 🖼️ **Attachments handled.** Images pull down and re-upload on push, identity intact.
 - 🔑 **Per-person tokens.** Each user syncs exactly what they can already see in Outline.
+- 🚫 **Per-note opt-out.** A mapped folder can still skip a note. Check `outlineSuppressed` and that note is left alone: not pushed, not pulled over, and not deleted on either side because the other side deleted it.
 - 📦 **Three-file install.** No runtime dependencies, desktop or mobile.
 
 ## 🚫 What this isn't
@@ -63,6 +64,8 @@ Every Outline document has a monotonic `revision` counter. The plugin stores, pe
 | **changed** | **changed** | 🛑 **conflict — ask** |
 
 Nothing is overwritten on the strength of a timestamp unless you explicitly choose the "keep whichever was edited last" policy. Sync state lives in the plugin's own `data.json`, never in your notes — so the plugin doesn't chase its own writes.
+
+A note can opt out without leaving the folder. `outlineSuppressed: true` in its frontmatter takes it out of that table entirely: no push, no pull, no "the other side deleted it, so delete mine." New notes in a mapped folder get the checkbox automatically; whether it starts checked is a per-folder setting. Details are in **[USAGE.md](USAGE.md)**.
 
 > **The one race that can't be closed:** Outline's `documents.update` has no compare-and-swap, so a push is check-then-write. If someone writes *inside* that window it's detected afterward (the revision jumps by more than one) and reported — the overwritten text stays recoverable in Outline's history. Practically: don't sit in the Outline browser editor on a doc you're also editing locally.
 

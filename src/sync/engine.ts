@@ -729,6 +729,8 @@ export class SyncEngine {
 
 	private async handleRemoteDeletion(record: SyncRecord): Promise<void> {
 		const file = this.app.vault.getFileByPath(record.path);
+		// Another person deleting the wiki page must not touch a note this vault opted out of.
+		if (file && isOutlineSuppressed(parseNote(await this.app.vault.read(file)).frontmatter)) return;
 		if (file && this.settings.propagateRemoteDeletes) {
 			await this.app.fileManager.trashFile(file);
 		} else if (file) {

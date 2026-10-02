@@ -33,6 +33,8 @@ export default class OutlineSyncPlugin extends Plugin {
 	private syncing = false;
 	/** Paths whose next modify event is our own checkbox backfill. */
 	private readonly backfillWrites = new Set<string>();
+	/** Tracked notes currently opted out, so a delete can spare the Outline document after the file is gone. */
+	private readonly suppressedPaths = new Set<string>();
 
 	async onload(): Promise<void> {
 		await this.loadPersisted();
@@ -120,6 +122,7 @@ export default class OutlineSyncPlugin extends Plugin {
 		for (const file of this.app.vault.getMarkdownFiles()) {
 			if (!folders.some((folder) => isInsideFolder(file.path, folder))) continue;
 			const content = await this.app.vault.read(file);
+			this.noteSuppression(file.path, content);
 			if ("outlineSuppressed" in parseNote(content).frontmatter) continue;
 
 			this.backfillWrites.add(file.path);
@@ -208,6 +211,7 @@ export default class OutlineSyncPlugin extends Plugin {
 
 		// Last agreement with Outline, not the moment the box was checked.
 		let updated = setFrontmatterScalar(content, "outlineSuppressed", nextSuppressed);
+		this.noteSuppression(file.path, updated);
 		if (!currentlySuppressed) {
 			const agreedAt = this.state.byPath(file.path)?.baseUpdatedAt;
 			if (agreedAt) updated = setFrontmatterScalar(updated, "outlineLastsync", agreedAt);
@@ -241,6 +245,7 @@ export default class OutlineSyncPlugin extends Plugin {
 		if ("outlineSuppressed" in parsed.frontmatter) return;
 
 		const updated = setFrontmatterScalar(content, "outlineSuppressed", Boolean(mapping.suppressByDefault));
+		this.noteSuppression(file.path, updated);
 		await this.app.vault.modify(file, updated);
 	}
 
@@ -283,7 +288,9 @@ export default class OutlineSyncPlugin extends Plugin {
 		this.registerEvent(
 			this.app.vault.on("modify", (file) => {
 				if (file instanceof TFile && this.backfillWrites.delete(file.path)) return;
-				if (!(file instanceof TFile) || !this.autoPushEnabled()) return;
+				if (!(file instanceof TFile)) return;
+				if (file.extension === "md" && this.isTracked(file.path)) void this.refreshSuppression(file);
+				if (!this.autoPushEnabled()) return;
 				if (file.extension === "md") {
 					if (this.isTracked(file.path)) void this.queuePush(file, this.flushDebounced);
 				} else if (this.isSyncableFile(file)) {
@@ -311,6 +318,7 @@ export default class OutlineSyncPlugin extends Plugin {
 				if (!(file instanceof TFile)) return;
 				// Relocate the record even in manual mode, so the rename is not lost.
 				const record = this.state.relocate(oldPath, file.path);
+				if (this.suppressedPaths.delete(oldPath)) this.suppressedPaths.add(file.path);
 				if (!record) return;
 				void this.savePersisted();
 				if (!this.autoPushEnabled()) return;
@@ -326,15 +334,28 @@ export default class OutlineSyncPlugin extends Plugin {
 		this.registerEvent(
 			this.app.vault.on("delete", (file) => {
 				if (!(file instanceof TFile)) return;
+				const suppressed = this.suppressedPaths.has(file.path);
+				this.suppressedPaths.delete(file.path);
 				const record = this.state.byPath(file.path);
 				if (!record) return;
-				if (this.settings.propagateLocalDeletes) {
+				// A note opted out after it was synced must not take the shared
+				// Outline document with it. Someone else's vault may still use it.
+				if (this.settings.propagateLocalDeletes && !suppressed) {
 					void this.deleteRemote(record.documentId, file.basename);
 				}
 				this.state.remove(record.documentId);
 				void this.savePersisted();
 			}),
 		);
+	}
+
+	private noteSuppression(path: string, content: string): void {
+		if (isOutlineSuppressed(parseNote(content).frontmatter)) this.suppressedPaths.add(path);
+		else this.suppressedPaths.delete(path);
+	}
+
+	private async refreshSuppression(file: TFile): Promise<void> {
+		this.noteSuppression(file.path, await this.app.vault.read(file));
 	}
 
 	private async deleteRemote(documentId: string, title: string): Promise<void> {
