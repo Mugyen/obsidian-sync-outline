@@ -257,8 +257,50 @@ test("file wrapper carries the exact filename, even one Outline would reformat",
 	}
 });
 
+test("Outline's nested ordered lists come back tight and tab-indented", () => {
+	// Outline right-aligns markers (" 1." beside "10."), nests at 4/7 spaces, and
+	// wedges a blank line plus a whitespace-only line before every sub-list.
+	const outline =
+		" 1. Private\n\n    \n    1. Voice\n    2. Vision\n 2. Optimization\n 3. Hardware\n\n    \n" +
+		"    1. Wearable\n\n       \n       5. Ring\n       6. Control\n    2. Phone\n10. Ten\n\n    \n    1. Child";
+	assert.equal(
+		decodeFromOutline(outline),
+		"1. Private\n\t1. Voice\n\t2. Vision\n2. Optimization\n3. Hardware\n\t1. Wearable\n\n\t\t5. Ring\n" +
+			"\t\t6. Control\n\t2. Phone\n10. Ten\n\t1. Child",
+	);
+});
+
+test("a sub-list numbered from 5 keeps one blank line so it stays a list", () => {
+	// CommonMark: an ordered list may only interrupt a paragraph if it starts at 1.
+	assert.equal(
+		decodeFromOutline(" 4. Wearable\n\n       \n       5. Ring\n       6. Control\n 5. Phone"),
+		"4. Wearable\n\n\t5. Ring\n\t6. Control\n5. Phone",
+	);
+});
+
+test("bullet lists nest the same way", () => {
+	assert.equal(decodeFromOutline("* a\n\n  \n  * b\n  * c\n* d"), "- a\n\t- b\n\t- c\n- d");
+});
+
+test("text and blank lines outside lists are untouched", () => {
+	const text = "### Idea List\n\n\\-1. Clothes store\n\n\\-2. Grocery\n\n\n 1. First\n 2. Second\n\nAfter the list";
+	assert.equal(
+		decodeFromOutline(text),
+		"### Idea List\n\n-1. Clothes store\n\n-2. Grocery\n\n\n1. First\n2. Second\n\nAfter the list",
+	);
+});
+
+test("a paragraph inside a list item keeps its blank line and nesting", () => {
+	assert.equal(decodeFromOutline("* a\n\n  more about a\n* b"), "- a\n\n\tmore about a\n- b");
+});
+
+test("code fences are never re-indented", () => {
+	const code = "```\n    1. not a list\n\n    \n        2. still not\n```";
+	assert.equal(decodeFromOutline(code), code);
+});
+
 test("decode canonicalises Outline markdown to Obsidian style", () => {
-	assert.equal(decodeFromOutline("* a\n  * b"), "- a\n  - b");
+	assert.equal(decodeFromOutline("* a\n  * b"), "- a\n\t- b");
 	assert.equal(decodeFromOutline("\\-> arrow \\[bracket\\] \\~tilde"), "-> arrow [bracket] ~tilde");
 });
 

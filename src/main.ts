@@ -30,6 +30,8 @@ export default class OutlineSyncPlugin extends Plugin {
 	private pendingFullSync = false;
 	/** Serialises syncs so overlapping runs can't create duplicate documents. */
 	private syncing = false;
+	/** A sync asked for while another was running; it runs right after. */
+	private queuedSync?: { direction: SyncDirection; quiet: boolean };
 
 	async onload(): Promise<void> {
 		await this.loadPersisted();
@@ -124,7 +126,16 @@ export default class OutlineSyncPlugin extends Plugin {
 		// A fresh engine is built per call, so its own isRunning flag can't guard
 		// against overlapping syncs (button + poll + file-event). Serialise here,
 		// or two runs create duplicate documents for the same new file.
-		if (this.syncing) return;
+		if (this.syncing) {
+			// Don't drop the request silently — run it as soon as this one ends.
+			const queued = this.queuedSync;
+			this.queuedSync = {
+				direction: queued && queued.direction !== direction ? "both" : direction,
+				quiet: (queued?.quiet ?? true) && quiet,
+			};
+			if (!quiet) new Notice("Outline Sync: a sync is already running — yours will run right after it.");
+			return;
+		}
 		this.syncing = true;
 		const engine = this.getEngine();
 
@@ -141,6 +152,9 @@ export default class OutlineSyncPlugin extends Plugin {
 		} finally {
 			this.syncing = false;
 			this.setBusy(false);
+			const queued = this.queuedSync;
+			this.queuedSync = undefined;
+			if (queued) window.setTimeout(() => void this.runSync(queued.direction, queued.quiet), 0);
 		}
 		const done = direction === "pull" ? "pulled" : direction === "push" ? "pushed" : "synced";
 		this.setStatus(`Outline: ${done} ${timeOfDay()}`);
@@ -166,6 +180,7 @@ export default class OutlineSyncPlugin extends Plugin {
 			`Outline Sync: ${conflicts.length} note(s) changed in both places.`,
 			6000,
 		);
+		this.setStatus("Outline: waiting for your decision");
 		return new ConflictModal(this.app, conflicts).openAndWait();
 	}
 

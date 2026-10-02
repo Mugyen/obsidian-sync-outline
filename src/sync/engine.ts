@@ -264,13 +264,15 @@ export class SyncEngine {
 				}
 			}
 
-			// Non-markdown files sync as attachment-wrapped "file documents".
-			await this.syncFiles(mappings, remoteById, folderByCollection, summary, doPull, doPush);
-
+			// Ask about conflicts before the file pass: hashing and transferring
+			// attachments is the slow part, and the user is waiting on this answer.
 			if (conflicts.length > 0) {
 				summary.conflicts = conflicts.length;
 				await this.applyResolutions(conflicts, summary);
 			}
+
+			// Non-markdown files sync as attachment-wrapped "file documents".
+			await this.syncFiles(mappings, remoteById, folderByCollection, summary, doPull, doPush);
 
 			this.state.markSynced();
 			await this.persist();

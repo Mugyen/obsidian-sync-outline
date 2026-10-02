@@ -215,13 +215,124 @@ export function encodeForOutline(body: string): string {
 
 /** Turns Outline's markdown back into clean Obsidian markdown. */
 export function decodeFromOutline(text: string): string {
-	return text
+	const decoded = text
 		// Restore soft breaks: the sentinel (plus the space Outline inserts) → newline.
 		.replace(new RegExp(SOFT_BREAK_SENTINEL + " ?", "g"), "\n")
 		// Outline serialises unordered lists with "*"; Obsidian's convention is "-".
 		.replace(/^(\s*)\* /gm, "$1- ")
 		// Outline escapes characters that need no escaping in Obsidian prose.
 		.replace(/\\([-[\]~])/g, "$1");
+	return normalizeListsForObsidian(decoded);
+}
+
+const LIST_ITEM = /^([ \t]*)([-*+]|\d{1,9}[.)])(?:([ \t]+)(.*))?$/;
+
+/** Visual width of leading whitespace, with tabs to the next multiple of 4 (CommonMark). */
+function columnsOf(whitespace: string): number {
+	let column = 0;
+	for (const char of whitespace) column = char === "\t" ? column + 4 - (column % 4) : column + 1;
+	return column;
+}
+
+interface OpenItem {
+	/** Column where this item's content starts in Outline's text. */
+	sourceContent: number;
+	/** Indentation we emitted for the item. */
+	prefix: string;
+	/** Column where the item's content starts in what we emit. */
+	content: number;
+	/** Nested items emitted so far. */
+	children: number;
+}
+
+/** Indentation for a line nested inside `parent`: a tab when that nests correctly, else spaces. */
+function nestedPrefix(parent: OpenItem): string {
+	const tabbed = parent.prefix + "\t";
+	const width = columnsOf(tabbed);
+	return width >= parent.content && width <= parent.content + 3 ? tabbed : " ".repeat(parent.content);
+}
+
+/**
+ * Re-indents lists the way Obsidian writes them. Outline serialises nesting with
+ * ragged indentation (" 1." beside "10.", children at 3, 4 or 7 spaces) and puts
+ * a blank line plus a whitespace-only line before every sub-list. That is valid
+ * CommonMark and renders fine in Outline, but in Obsidian it is a mess. The
+ * nesting is kept exactly; only the layout changes: tight, tab-indented lists.
+ */
+export function normalizeListsForObsidian(text: string): string {
+	const out: string[] = [];
+	const open: OpenItem[] = [];
+	let blanks = 0;
+	let inFence = false;
+
+	const flushBlanks = () => {
+		for (; blanks > 0; blanks--) out.push("");
+	};
+	const closeTo = (indent: number) => {
+		while (open.length > 0 && indent < open[open.length - 1].sourceContent) open.pop();
+	};
+
+	for (const line of text.split("\n")) {
+		if (inFence || FENCE.test(line)) {
+			// Code is never re-indented, and a fence inside a list ends our tracking.
+			if (FENCE.test(line)) inFence = !inFence;
+			flushBlanks();
+			open.length = 0;
+			out.push(line);
+			continue;
+		}
+		if (line.trim() === "") {
+			blanks++;
+			continue;
+		}
+
+		const indent = columnsOf(/^[ \t]*/.exec(line)?.[0] ?? "");
+		const item = LIST_ITEM.exec(line);
+
+		if (item) {
+			closeTo(indent);
+			const marker = item[2];
+			const parent = open[open.length - 1];
+			if (parent) {
+				// Blank lines between an item and its sub-list are Outline's artifact —
+				// except that an ordered sub-list not starting at 1 cannot interrupt the
+				// parent's text in CommonMark, so it needs one to stay a list.
+				const startsAtOtherThanOne = /^\d/.test(marker) && Number.parseInt(marker, 10) !== 1;
+				blanks = parent.children === 0 && startsAtOtherThanOne ? Math.min(blanks, 1) : 0;
+				parent.children++;
+			}
+			flushBlanks();
+			const gap = item[3] ?? " ";
+			const gapWidth = gap.length >= 1 && gap.length <= 4 && !gap.includes("\t") ? gap.length : 1;
+			const prefix = parent ? nestedPrefix(parent) : "";
+			out.push(prefix + marker + (item[4] ? ` ${item[4]}` : ""));
+			open.push({
+				sourceContent: indent + marker.length + gapWidth,
+				prefix,
+				content: columnsOf(prefix) + marker.length + 1,
+				children: 0,
+			});
+			continue;
+		}
+
+		if (open.length > 0) {
+			if (blanks === 0) {
+				// Continuation of the item just above, however it was indented.
+				out.push(nestedPrefix(open[open.length - 1]) + line.trimStart());
+				continue;
+			}
+			closeTo(indent);
+			if (open.length > 0) {
+				flushBlanks();
+				out.push(nestedPrefix(open[open.length - 1]) + line.trimStart());
+				continue;
+			}
+		}
+		flushBlanks();
+		out.push(line);
+	}
+	flushBlanks();
+	return out.join("\n");
 }
 
 const OUTLINE_ATTACHMENT = /!\[([^\]]*)\]\((\/api\/attachments\.redirect\?id=([a-f0-9-]{36})[^)]*)\)/gi;
