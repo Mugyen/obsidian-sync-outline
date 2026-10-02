@@ -17,7 +17,7 @@ const CASES: [string, string][] = [
 	],
 	[
 		"Timing",
-		"Outline is checked every ★ 1 min, and once on startup ★. Your edits are pushed ★ 1 min after you stop " +
+		"Outline is checked every ★ 10 sec, and once on startup ★. Your edits are pushed ★ 10 sec after you stop " +
 			"typing. ⬇ Pull and ⬆ Push in the status bar sync immediately; a click during a running sync runs right " +
 			"after it. (A browser edit may not come through yet if Outline hasn't saved it. Refresh the Outline page " +
 			"or wait a moment, then Pull again.)",

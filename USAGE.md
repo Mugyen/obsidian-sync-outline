@@ -49,8 +49,8 @@ Documents are identified by an `outlineId` in frontmatter, so renaming or moving
 
 | Setting | What it does |
 | --- | --- |
-| **Check Outline every** | How often to pull other people's edits (default 1 min). Outline saves browser edits to its database with a delay, so changes made there can take longer to appear. |
-| **Push local edits after** | Quiet period after your last keystroke before a note is pushed (default 1 min), or *Manual only*. The status-bar ⬇ Pull / ⬆ Push buttons sync immediately. |
+| **Check Outline every** | How often to pull other people's edits (default 10 s). Outline saves browser edits to its database with a delay, so changes made there can take longer to appear. |
+| **Push local edits after** | Quiet period after your last keystroke before a note is pushed (default 10 s), or *Manual only*. The status-bar ⬇ Pull / ⬆ Push buttons sync immediately. |
 | **When both sides changed** | Conflict policy. Leave on **Ask me** unless you have a reason. |
 | **Delete Outline document when the note is deleted** | Off by default. With it off, deleting a note locally just re-downloads it next sync (safe). On, it removes the doc for the whole team. |
 

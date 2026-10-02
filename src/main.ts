@@ -435,11 +435,12 @@ export default class OutlineSyncPlugin extends Plugin {
 	private async loadPersisted(): Promise<void> {
 		const data = (await this.loadData()) as Partial<PersistedData> | null;
 		this.settings = { ...DEFAULT_SETTINGS, ...(data?.settings ?? {}) };
-		// 0.7.0 moved the push delay default from 3 s to 1 min. Move only people
-		// still on the old default; anyone who chose an interval keeps it.
-		if (data?.settings && (data.settings.settingsVersion ?? 0) < 1) {
-			if (this.settings.pushDebounceMs === 3000) this.settings.pushDebounceMs = 60_000;
-			this.settings.settingsVersion = 1;
+		// 0.7.1 made 10 s the default for both checking and pushing. Move only people
+		// still on an earlier default; anyone who chose an interval keeps it.
+		if (data?.settings && (data.settings.settingsVersion ?? 0) < 2) {
+			if ([3000, 60_000].includes(this.settings.pushDebounceMs)) this.settings.pushDebounceMs = 10_000;
+			if (this.settings.pollIntervalSeconds === 60) this.settings.pollIntervalSeconds = 10;
+			this.settings.settingsVersion = 2;
 			await this.saveData({ settings: this.settings, state: data.state ?? emptyState() });
 		}
 		this.state = new SyncStateStore(data?.state);

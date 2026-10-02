@@ -168,6 +168,7 @@ export class OutlineSyncSettingTab extends PluginSettingTab {
 				dropdown
 					.addOptions({
 						"0": "Never (manual only)",
+						"10": "10 seconds",
 						"30": "30 seconds",
 						"60": "1 minute",
 						"300": "5 minutes",

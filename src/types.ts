@@ -49,8 +49,8 @@ export const DEFAULT_SETTINGS: OutlineSyncSettings = {
 	baseUrl: "",
 	apiToken: "",
 	mappings: [],
-	pollIntervalSeconds: 60,
-	pushDebounceMs: 60_000,
+	pollIntervalSeconds: 10,
+	pushDebounceMs: 10_000,
 	syncOnStartup: true,
 	conflictPolicy: "ask",
 	attachmentFolder: "Outline Attachments",
@@ -59,7 +59,7 @@ export const DEFAULT_SETTINGS: OutlineSyncSettings = {
 	propagateRemoteDeletes: true,
 	convertMarkdown: true,
 	syncFileExtensions: ["html"],
-	settingsVersion: 1,
+	settingsVersion: 2,
 };
 
 /**
