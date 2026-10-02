@@ -1,11 +1,48 @@
-import { Notice, PluginSettingTab, Setting, type App } from "obsidian";
+import { AbstractInputSuggest, Notice, PluginSettingTab, Setting, TextComponent, ToggleComponent, TFolder, type App } from "obsidian";
 
 import { OutlineClient } from "../outline/client";
 import type OutlineSyncPlugin from "../main";
+
+class FolderSuggest extends AbstractInputSuggest<TFolder> {
+	private inputEl: HTMLInputElement;
+
+	constructor(app: App, inputEl: HTMLInputElement) {
+		super(app, inputEl);
+		this.inputEl = inputEl;
+	}
+
+	getSuggestions(inputStr: string): TFolder[] {
+		const lower = inputStr.toLowerCase();
+		return this.app.vault
+			.getAllLoadedFiles()
+			.filter((f): f is TFolder => f instanceof TFolder)
+			.filter((folder) => folder.path.toLowerCase().includes(lower));
+	}
+
+	renderSuggestion(folder: TFolder, el: HTMLElement): void {
+		el.setText(folder.path);
+	}
+
+	selectSuggestion(folder: TFolder): void {
+		this.inputEl.value = folder.path;
+		this.inputEl.dispatchEvent(new Event("input"));
+		this.close();
+	}
+}
+
+
+function trimSlashes(value: string): string {
+	let folder = value.trim();
+	while (folder.startsWith("/")) folder = folder.slice(1);
+	while (folder.endsWith("/")) folder = folder.slice(0, -1);
+	return folder;
+}
+
 import type { ConflictPolicy, OutlineCollection } from "../types";
 
 export class OutlineSyncSettingTab extends PluginSettingTab {
 	private collections: OutlineCollection[] = [];
+	private advancedOpen = new Set<string>();
 
 	constructor(
 		app: App,
@@ -117,39 +154,97 @@ export class OutlineSyncSettingTab extends PluginSettingTab {
 			const mapping = this.plugin.settings.mappings.find(
 				(candidate) => candidate.collectionId === collection.id,
 			);
+			const isEnabled = Boolean(mapping);
+			const isOpen = isEnabled && this.advancedOpen.has(collection.id);
 
-			const setting = new Setting(containerEl).setName(collection.name);
-			setting.addText((text) =>
-				text
-					.setPlaceholder("Vault folder")
-					.setValue(mapping?.folder ?? collection.name)
-					.setDisabled(!mapping)
-					.onChange(async (value) => {
-						const current = this.plugin.settings.mappings.find(
-							(candidate) => candidate.collectionId === collection.id,
-						);
-						if (!current) return;
-						current.folder = value.trim().replace(/^\/+|\/+$/g, "");
-						await this.plugin.saveSettings();
-					}),
-			);
-			setting.addToggle((toggle) =>
-				toggle.setValue(Boolean(mapping)).onChange(async (enabled) => {
+			// One setting item. Advanced fields are appended inside it so the
+			// card grows instead of spawning a second row in the settings list.
+			const row = new Setting(containerEl).setName(collection.name);
+			row.settingEl.addClass("outline-sync-collection");
+			if (isOpen) row.settingEl.addClass("is-open");
+
+			row.controlEl.createSpan({
+				text: "Enable:",
+				cls: "outline-sync-enable-label",
+			});
+
+			row.addToggle((toggle) =>
+				toggle.setValue(isEnabled).onChange(async (enabled) => {
 					if (enabled) {
 						this.plugin.settings.mappings.push({
 							collectionId: collection.id,
 							collectionName: collection.name,
 							folder: collection.name,
+							suppressByDefault: false,
 						});
 					} else {
 						this.plugin.settings.mappings = this.plugin.settings.mappings.filter(
 							(candidate) => candidate.collectionId !== collection.id,
 						);
+						this.advancedOpen.delete(collection.id);
 					}
 					await this.plugin.saveSettings();
 					this.display();
 				}),
 			);
+
+			// Always reserve the caret slot so a disabled collection's toggle
+			// lines up with one that has the caret showing.
+			row.addExtraButton((btn) => {
+				btn.setIcon(isOpen ? "chevron-up" : "chevron-down");
+				if (!isEnabled) {
+					btn.extraSettingsEl.addClass("outline-sync-caret-slot");
+					btn.extraSettingsEl.ariaHidden = "true";
+					return;
+				}
+				btn.setTooltip(isOpen ? "Hide advanced settings" : "Show advanced settings").onClick(() => {
+					if (this.advancedOpen.has(collection.id)) {
+						this.advancedOpen.delete(collection.id);
+					} else {
+						this.advancedOpen.add(collection.id);
+					}
+					this.display();
+				});
+			});
+
+			if (isOpen && mapping) {
+				const panel = row.settingEl.createDiv({ cls: "outline-sync-collection-advanced" });
+
+				const folderGroup = panel.createDiv({ cls: "outline-sync-advanced-folder" });
+				folderGroup.createSpan({ text: "Local folder:", cls: "outline-sync-advanced-label" });
+				const folderInput = new TextComponent(folderGroup)
+					.setPlaceholder("Vault folder")
+					.setValue(mapping.folder);
+				folderInput.inputEl.addClass("outline-sync-folder-input");
+				folderInput.onChange(async (value) => {
+					const current = this.plugin.settings.mappings.find(
+						(candidate) => candidate.collectionId === collection.id,
+					);
+					if (!current) return;
+					current.folder = trimSlashes(value);
+					await this.plugin.saveSettings();
+				});
+				new FolderSuggest(this.app, folderInput.inputEl);
+
+				const syncGroup = panel.createDiv({ cls: "outline-sync-advanced-sync" });
+				syncGroup.createSpan({
+					text: "Local Files Always Sync:",
+					cls: "outline-sync-advanced-label",
+				});
+				new ToggleComponent(syncGroup)
+					.setValue(!mapping.suppressByDefault)
+					.setTooltip(
+						"On: new notes sync unless you suppress them. Off: new notes stay local until you turn sync on.",
+					)
+					.onChange(async (value) => {
+						const current = this.plugin.settings.mappings.find(
+							(candidate) => candidate.collectionId === collection.id,
+						);
+						if (!current) return;
+						current.suppressByDefault = !value;
+						await this.plugin.saveSettings();
+					});
+			}
 		}
 
 		new Setting(containerEl).setName("Syncing").setHeading();
@@ -217,9 +312,9 @@ export class OutlineSyncSettingTab extends PluginSettingTab {
 				dropdown
 					.addOptions({
 						ask: "Ask me",
-						newer: "Keep whichever was edited last",
-						local: "Always keep my local note",
-						remote: "Always keep Outline's version",
+						local: "Keep local version",
+						remote: "Keep remote version",
+						newer: "Keep the newer version",
 					})
 					.setValue(this.plugin.settings.conflictPolicy)
 					.onChange(async (value) => {
@@ -228,23 +323,22 @@ export class OutlineSyncSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		new Setting(containerEl).setName("Files").setHeading();
-
 		new Setting(containerEl)
 			.setName("Attachment folder")
-			.setDesc("Where images downloaded from Outline are stored.")
+			.setDesc("Downloaded images and attachments will be saved here (relative to vault root).")
 			.addText((text) =>
 				text
+					.setPlaceholder("Outline Attachments")
 					.setValue(this.plugin.settings.attachmentFolder)
 					.onChange(async (value) => {
-						this.plugin.settings.attachmentFolder = value.trim().replace(/^\/+|\/+$/g, "");
+						this.plugin.settings.attachmentFolder = value.trim();
 						await this.plugin.saveSettings();
 					}),
 			);
 
 		new Setting(containerEl)
-			.setName("Create Outline documents for new notes")
-			.setDesc("New notes inside a synced folder become documents in the matching collection.")
+			.setName("Create remote documents for new local files")
+			.setDesc("When a new note appears in a mapped folder, automatically create it in Outline.")
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.createRemoteForNewFiles).onChange(async (value) => {
 					this.plugin.settings.createRemoteForNewFiles = value;
@@ -253,20 +347,8 @@ export class OutlineSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Delete local note when deleted in Outline")
-			.setDesc("Off keeps the note and warns instead.")
-			.addToggle((toggle) =>
-				toggle.setValue(this.plugin.settings.propagateRemoteDeletes).onChange(async (value) => {
-					this.plugin.settings.propagateRemoteDeletes = value;
-					await this.plugin.saveSettings();
-				}),
-			);
-
-		new Setting(containerEl)
-			.setName("Delete Outline document when the note is deleted")
-			.setDesc(
-				"Off by default. Deleting a note locally otherwise removes it for everyone; it will simply be downloaded again.",
-			)
+			.setName("Propagate local deletes")
+			.setDesc("When you delete a note locally, also delete the corresponding document in Outline.")
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.propagateLocalDeletes).onChange(async (value) => {
 					this.plugin.settings.propagateLocalDeletes = value;
@@ -275,10 +357,18 @@ export class OutlineSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Preserve Obsidian formatting")
-			.setDesc(
-				"Convert markdown between Obsidian and Outline so your local formatting survives the round-trip — line breaks, dash bullets, no stray escapes. Adds an invisible marker to Outline documents to keep soft line breaks. Turn off to exchange raw markdown and keep Outline documents marker-free (soft breaks will merge).",
-			)
+			.setName("Propagate remote deletes")
+			.setDesc("When a document is deleted in Outline, move the local note to the Obsidian trash.")
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.propagateRemoteDeletes).onChange(async (value) => {
+					this.plugin.settings.propagateRemoteDeletes = value;
+					await this.plugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Convert markdown between Obsidian and Outline")
+			.setDesc("Preserve soft line breaks and use Obsidian's list/bullet style. Turn off to exchange raw markdown.")
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.convertMarkdown).onChange(async (value) => {
 					this.plugin.settings.convertMarkdown = value;
@@ -287,37 +377,18 @@ export class OutlineSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Sync these file types too")
-			.setDesc(
-				"Comma-separated extensions of non-markdown files to sync (e.g. html, pdf, csv). Each syncs as a downloadable attachment in Outline. Leave blank to sync only Markdown.",
-			)
+			.setName("Sync non-markdown files as attachments")
+			.setDesc("File extensions (without dot) that should be uploaded as attachments. Example: html,pdf")
 			.addText((text) =>
 				text
-					.setPlaceholder("html, pdf")
-					.setValue(this.plugin.settings.syncFileExtensions.join(", "))
+					.setPlaceholder("html,pdf")
+					.setValue(this.plugin.settings.syncFileExtensions.join(","))
 					.onChange(async (value) => {
 						this.plugin.settings.syncFileExtensions = value
 							.split(",")
-							.map((e) => e.trim().toLowerCase().replace(/^\./, ""))
+							.map((e) => e.trim().toLowerCase())
 							.filter(Boolean);
 						await this.plugin.saveSettings();
-					}),
-			);
-
-		new Setting(containerEl).setName("Maintenance").setHeading();
-
-		new Setting(containerEl)
-			.setName("Reset sync state")
-			.setDesc(
-				"Forgets which revision each note was last synced at. Nothing is deleted, but the next sync treats every difference as a conflict.",
-			)
-			.addButton((button) =>
-				button
-					.setButtonText("Reset")
-					.setWarning()
-					.onClick(async () => {
-						await this.plugin.resetState();
-						new Notice("Sync state cleared.");
 					}),
 			);
 	}

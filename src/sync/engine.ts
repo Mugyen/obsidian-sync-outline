@@ -22,6 +22,7 @@ import {
 	isFileWrapper,
 	parseFileWrapper,
 	parseNote,
+	isOutlineSuppressed,
 	rewriteAttachmentsToLocal,
 	rewriteImageToOutline,
 	withFrontmatter,
@@ -880,6 +881,7 @@ export class SyncEngine {
 			if (!folders.some((folder) => isInsideFolder(file.path, folder))) continue;
 			const content = await this.app.vault.read(file);
 			const parsed = parseNote(content);
+			if (isOutlineSuppressed(parsed.frontmatter)) continue;
 			const outlineId = typeof parsed.frontmatter.outlineId === "string" ? parsed.frontmatter.outlineId : undefined;
 			notes.push({
 				file,
@@ -973,7 +975,13 @@ export class SyncEngine {
 
 		const existing = this.app.vault.getFileByPath(normalized);
 		const previous = existing ? await this.app.vault.read(existing) : "";
-		const content = withFrontmatter(previous ? replaceBody(previous, body) : body, frontmatter);
+		const updates = { ...frontmatter };
+		// Notes this engine creates (a pull of a new document) should still
+		// show the checkbox. User-created notes are stamped separately.
+		if (!existing && !("outlineSuppressed" in updates)) {
+			updates.outlineSuppressed = false;
+		}
+		const content = withFrontmatter(previous ? replaceBody(previous, body) : body, updates);
 
 		this.selfWrites.set(normalized, hashBody(parseNote(content).body));
 		if (existing) {

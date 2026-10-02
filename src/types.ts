@@ -5,6 +5,13 @@ export interface CollectionMapping {
 	collectionName: string;
 	/** Vault-relative folder, e.g. "Engineering". */
 	folder: string;
+	/**
+	 * When true, newly created notes in this folder get outlineSuppressed: true
+	 * by default (user can still toggle per-note).
+	 * When false/undefined (default), notes sync normally unless the user
+	 * explicitly suppresses them.
+	 */
+	suppressByDefault?: boolean;
 }
 
 export type ConflictPolicy = "ask" | "local" | "remote" | "newer";

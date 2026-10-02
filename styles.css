@@ -108,3 +108,83 @@
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
 }
+
+/* Collection row grows in place when advanced settings are open. */
+.outline-sync-collection {
+	flex-wrap: wrap;
+	align-items: center;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	/* Same inset as the other settings rows. */
+	padding: var(--setting-items-padding-y) var(--setting-items-padding-x);
+	margin-bottom: 0.55rem;
+}
+
+.outline-sync-enable-label {
+	margin-right: 0.45rem;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	white-space: nowrap;
+}
+
+.outline-sync-caret-slot {
+	visibility: hidden;
+	pointer-events: none;
+}
+
+.outline-sync-collection-advanced {
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+	gap: 0.65rem;
+	flex: 1 0 100%;
+	width: 100%;
+	margin-top: 12px;
+	padding: 0;
+}
+
+.outline-sync-advanced-folder,
+.outline-sync-advanced-sync {
+	display: flex;
+	align-items: center;
+	gap: 0.45rem;
+	width: 100%;
+	min-width: 0;
+}
+
+.outline-sync-advanced-folder {
+	justify-content: flex-start;
+}
+
+.outline-sync-advanced-sync {
+	justify-content: flex-start;
+}
+
+.outline-sync-advanced-label {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	white-space: nowrap;
+}
+
+.outline-sync-folder-input {
+	flex: 1 1 auto;
+	min-width: 8rem;
+	max-width: 28rem;
+}
+
+@media (max-width: 640px) {
+	.outline-sync-collection > .setting-item-control {
+		flex-wrap: wrap;
+		justify-content: flex-end;
+		row-gap: 0.35rem;
+	}
+
+	.outline-sync-collection-advanced {
+		gap: 0.75rem;
+	}
+
+	.outline-sync-folder-input {
+		width: 100%;
+		max-width: none;
+	}
+}

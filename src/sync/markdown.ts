@@ -2,7 +2,21 @@
 export interface OutlineFrontmatter {
 	outlineId?: string;
 	outlineUrl?: string;
+	outlineSuppressed?: boolean;
+	/** ISO timestamp of the last successful sync before suppression was enabled. */
+	outlineLastsync?: string;
 	[key: string]: unknown;
+}
+
+/** Returns true if the note's frontmatter has outlineSuppressed set to a truthy value. */
+export function isOutlineSuppressed(frontmatter: Record<string, unknown>): boolean {
+	const v = frontmatter.outlineSuppressed;
+	if (typeof v === "boolean") return v;
+	if (typeof v === "string") {
+		const s = v.toLowerCase().trim();
+		return s === "true" || s === "1" || s === "yes" || s === "on";
+	}
+	return false;
 }
 
 export interface ParsedNote {

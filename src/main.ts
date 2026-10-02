@@ -3,6 +3,7 @@ import { Notice, Plugin, TFile, debounce, setIcon, setTooltip } from "obsidian";
 import { OutlineClient } from "./outline/client";
 import { SyncEngine, type Conflict, type Resolution, type SyncDirection } from "./sync/engine";
 import { isInsideFolder, parentFolderOf } from "./sync/paths";
+import { isOutlineSuppressed, parseNote, withFrontmatter } from "./sync/markdown";
 import { SyncStateStore, emptyState } from "./sync/state";
 import { DEFAULT_SETTINGS, type OutlineSyncSettings, type SyncState, type SyncSummary } from "./types";
 import { ConflictModal } from "./ui/conflict-modal";
@@ -30,9 +31,12 @@ export default class OutlineSyncPlugin extends Plugin {
 	private pendingFullSync = false;
 	/** Serialises syncs so overlapping runs can't create duplicate documents. */
 	private syncing = false;
+	/** Paths whose next modify event is our own checkbox backfill. */
+	private readonly backfillWrites = new Set<string>();
 
 	async onload(): Promise<void> {
 		await this.loadPersisted();
+		this.registerSuppressionProperty();
 		this.addSettingTab(new OutlineSyncSettingTab(this.app, this));
 
 		this.buildStatusBar();
@@ -76,16 +80,51 @@ export default class OutlineSyncPlugin extends Plugin {
 			},
 		});
 
+		this.addCommand({
+			id: "toggle-outline-suppression",
+			name: "Toggle Outline suppression for active note",
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveFile();
+				if (!file || file.extension !== "md") return false;
+				if (!checking) void this.toggleNoteSuppression(file);
+				return true;
+			},
+		});
+
 		this.registerVaultEvents();
 
 		this.app.workspace.onLayoutReady(() => {
-			this.restartPolling();
-			if (this.settings.syncOnStartup && this.isConfigured()) void this.syncNow(true);
+			void this.prepareAndStart();
 		});
 	}
 
 	onunload(): void {
 		this.clearPolling();
+	}
+
+	private async prepareAndStart(): Promise<void> {
+		await this.backfillSuppressionProperty();
+		this.restartPolling();
+		if (this.settings.syncOnStartup && this.isConfigured()) void this.syncNow(true);
+	}
+
+	/**
+	 * Notes synced before this property existed have no checkbox. Add an
+	 * unchecked one so the user can opt out later, without changing what
+	 * already syncs. New notes still follow the folder default.
+	 */
+	private async backfillSuppressionProperty(): Promise<void> {
+		const folders = this.settings.mappings.map((mapping) => mapping.folder).filter(Boolean);
+		if (folders.length === 0) return;
+
+		for (const file of this.app.vault.getMarkdownFiles()) {
+			if (!folders.some((folder) => isInsideFolder(file.path, folder))) continue;
+			const content = await this.app.vault.read(file);
+			if ("outlineSuppressed" in parseNote(content).frontmatter) continue;
+
+			this.backfillWrites.add(file.path);
+			await this.app.vault.modify(file, withFrontmatter(content, { outlineSuppressed: false }));
+		}
 	}
 
 	private isConfigured(): boolean {
@@ -161,6 +200,64 @@ export default class OutlineSyncPlugin extends Plugin {
 		}
 	}
 
+	private async toggleNoteSuppression(file: TFile): Promise<void> {
+		const content = await this.app.vault.read(file);
+		const parsed = parseNote(content);
+		const currentlySuppressed = isOutlineSuppressed(parsed.frontmatter);
+		const nextSuppressed = !currentlySuppressed;
+
+		const updates: Record<string, unknown> = { outlineSuppressed: nextSuppressed };
+
+		// Stamp last sync time when we are enabling suppression on a previously synced note
+		if (!currentlySuppressed && parsed.frontmatter.outlineId) {
+			updates.outlineLastsync = new Date().toISOString();
+		}
+
+		const updated = withFrontmatter(content, updates);
+		await this.app.vault.modify(file, updated);
+		new Notice(
+			currentlySuppressed
+				? "Outline suppression removed; note will sync."
+				: "Note suppressed from Outline sync.",
+		);
+	}
+
+	private async onTrackedNoteCreated(file: TFile): Promise<void> {
+		await this.applyFolderDefaultSuppression(file);
+		if (!this.autoPushEnabled() || !this.settings.createRemoteForNewFiles) return;
+
+		const content = await this.app.vault.read(file);
+		if (isOutlineSuppressed(parseNote(content).frontmatter)) return;
+		this.pendingPushes.add(file.path);
+		this.flushDebounced();
+	}
+
+	private async applyFolderDefaultSuppression(file: TFile): Promise<void> {
+		const mapping = this.settings.mappings.find((m) => isInsideFolder(file.path, m.folder));
+		if (!mapping) return;
+
+		const content = await this.app.vault.read(file);
+		const parsed = parseNote(content);
+		// Leave an explicit choice alone. A note the engine just created already
+		// carries outlineId and gets an unchecked box from writeNote.
+		if ("outlineSuppressed" in parsed.frontmatter) return;
+
+		const updated = withFrontmatter(content, {
+			outlineSuppressed: Boolean(mapping.suppressByDefault),
+		});
+		await this.app.vault.modify(file, updated);
+	}
+
+	/** So the property shows up as a checkbox instead of free text. */
+	private registerSuppressionProperty(): void {
+		const manager = (
+			this.app as unknown as {
+				metadataTypeManager?: { setType?: (key: string, type: string) => void };
+			}
+		).metadataTypeManager;
+		manager?.setType?.("outlineSuppressed", "checkbox");
+	}
+
 	private async askAboutConflicts(conflicts: Conflict[]): Promise<Map<string, Resolution>> {
 		new Notice(
 			`Outline Sync: ${conflicts.length} note(s) changed in both places.`,
@@ -189,6 +286,7 @@ export default class OutlineSyncPlugin extends Plugin {
 
 		this.registerEvent(
 			this.app.vault.on("modify", (file) => {
+				if (file instanceof TFile && this.backfillWrites.delete(file.path)) return;
 				if (!(file instanceof TFile) || !this.autoPushEnabled()) return;
 				if (file.extension === "md") {
 					if (this.isTracked(file.path)) void this.queuePush(file, this.flushDebounced);
@@ -202,12 +300,9 @@ export default class OutlineSyncPlugin extends Plugin {
 
 		this.registerEvent(
 			this.app.vault.on("create", (file) => {
-				if (!(file instanceof TFile) || !this.autoPushEnabled()) return;
-				if (file.extension === "md") {
-					if (this.isTracked(file.path) && this.settings.createRemoteForNewFiles) {
-						this.pendingPushes.add(file.path);
-						this.flushDebounced();
-					}
+				if (!(file instanceof TFile)) return;
+				if (file.extension === "md" && this.isTracked(file.path)) {
+					void this.onTrackedNoteCreated(file);
 				} else if (this.isSyncableFile(file)) {
 					this.pendingFullSync = true;
 					this.flushDebounced();
