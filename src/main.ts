@@ -81,8 +81,8 @@ export default class OutlineSyncPlugin extends Plugin {
 		});
 
 		this.addCommand({
-			id: "toggle-outline-suppression",
-			name: "Toggle Outline suppression for active note",
+			id: "toggle-suppression",
+			name: "Toggle suppression for the active note",
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveFile();
 				if (!file || file.extension !== "md") return false;
