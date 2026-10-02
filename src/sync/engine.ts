@@ -112,9 +112,11 @@ export class SyncEngine {
 		const doPush = direction !== "pull";
 
 		try {
-			const mappings = this.settings.mappings.filter((mapping) => mapping.collectionId && mapping.folder);
+			const mappings = await this.liveMappings(
+				this.settings.mappings.filter((mapping) => mapping.collectionId && mapping.folder),
+			);
 			if (mappings.length === 0) {
-				this.hooks.onError("No collections mapped to folders yet.");
+				if (this.settings.mappings.length === 0) this.hooks.onError("No collections mapped to folders yet.");
 				return summary;
 			}
 
@@ -125,6 +127,25 @@ export class SyncEngine {
 				folderByCollection.set(mapping.collectionId, mapping.folder);
 				for (const document of await this.client.listDocuments(mapping.collectionId)) {
 					remoteById.set(document.id, document);
+				}
+			}
+
+			// Folders first, before notes are read: a folder renamed on either side
+			// is renamed on the other, so the notes inside resolve to one path and
+			// none of them looks moved. Shallowest first, so parents lead children.
+			const folders = [...remoteById.values()]
+				.filter((remote) => isFolderPlaceholder(remote.text) && folderByCollection.has(remote.collectionId))
+				.map((remote) => ({
+					id: remote.id,
+					depth: pathForDocument(remote, remoteById, folderByCollection.get(remote.collectionId)!).split("/").length,
+				}))
+				.sort((a, b) => a.depth - b.depth);
+			for (const { id } of folders) {
+				const remote = remoteById.get(id)!;
+				try {
+					await this.reconcileFolder(remote, remoteById, folderByCollection.get(remote.collectionId)!, summary, doPull, doPush);
+				} catch (error) {
+					summary.errors.push(describe(error, remote.title));
 				}
 			}
 
@@ -141,12 +162,8 @@ export class SyncEngine {
 				if (!folder) continue;
 				const desiredPath = pathForDocument(remote, remoteById, folder);
 
-				// A folder placeholder is inert: mirror it as a bare folder and
-				// never write a note for it or pull its edits.
-				if (isFolderPlaceholder(remote.text)) {
-					if (doPull) await this.adoptRemoteFolder(remote, desiredPath);
-					continue;
-				}
+				// Folder placeholders were reconciled before the scan.
+				if (isFolderPlaceholder(remote.text)) continue;
 
 				// A file document wraps a non-markdown file; handled by syncFiles.
 				if (isFileWrapper(remote.text)) continue;
@@ -851,9 +868,49 @@ export class SyncEngine {
 		return created.id;
 	}
 
-	/** Mirrors an inert folder placeholder as a bare local folder. */
-	private async adoptRemoteFolder(remote: RemoteDocument, desiredPath: string): Promise<void> {
-		const folderPath = childFolderFor(desiredPath);
+	/**
+	 * One folder placeholder. Renamed in Obsidian (Outline's name unchanged since
+	 * we last agreed) → rename it in Outline. Otherwise mirror Outline: create the
+	 * folder, or follow a rename made in Outline by renaming the local folder.
+	 */
+	private async reconcileFolder(
+		remote: RemoteDocument,
+		remoteById: Map<string, RemoteDocument>,
+		rootFolder: string,
+		summary: SyncSummary,
+		doPull: boolean,
+		doPush: boolean,
+	): Promise<void> {
+		const folderPath = childFolderFor(pathForDocument(remote, remoteById, rootFolder));
+		const record = this.state.get(remote.id);
+		const renamedLocally =
+			record?.isFolder === true &&
+			remote.title === record.title &&
+			record.path !== folderPath &&
+			parentFolderOf(record.path) === parentFolderOf(folderPath) &&
+			this.app.vault.getAbstractFileByPath(normalizePath(record.path)) !== null;
+
+		if (renamedLocally) {
+			if (!doPush) return;
+			const title = record.path.split("/").pop() ?? remote.title;
+			await this.client.updateDocument({ id: remote.id, title });
+			remoteById.set(remote.id, { ...remote, title });
+			record.title = title;
+			summary.pushed++;
+			return;
+		}
+		if (!doPull) return;
+
+		// Renamed or moved in Outline: carry the local folder, notes and all.
+		const previous = record?.isFolder ? record.path : undefined;
+		if (previous && previous !== folderPath) {
+			const existing = this.app.vault.getAbstractFileByPath(normalizePath(previous));
+			if (existing && !this.app.vault.getAbstractFileByPath(normalizePath(folderPath))) {
+				await this.ensureFolder(parentFolderOf(folderPath));
+				await this.app.fileManager.renameFile(existing, normalizePath(folderPath));
+				this.state.relocateFolder(previous, folderPath);
+			}
+		}
 		await this.ensureFolder(folderPath);
 		this.state.set({
 			documentId: remote.id,
@@ -928,6 +985,44 @@ export class SyncEngine {
 	 * snapshots the `revision` counter only periodically, so revision alone
 	 * misses edits made by typing in the browser — `updatedAt` catches them.
 	 */
+	/**
+	 * Drops mappings whose other end is gone, without deleting anything on either
+	 * side: a collection deleted (or no longer accessible) in Outline, or an
+	 * already-synced folder deleted in Obsidian. Syncing simply stops for them.
+	 * A mapping whose folder doesn't exist yet but has never synced is kept —
+	 * that's a collection just switched on, and the first pull creates the folder.
+	 */
+	private async liveMappings(mappings: CollectionMapping[]): Promise<CollectionMapping[]> {
+		const live: CollectionMapping[] = [];
+		const dropped: string[] = [];
+		for (const mapping of mappings) {
+			const folder = mapping.folder.replace(/^\/+|\/+$/g, "");
+			const name = mapping.collectionName || "the collection";
+			if (!(await this.client.getCollection(mapping.collectionId))) {
+				dropped.push(mapping.collectionId);
+				this.hooks.onError(
+					`"${name}" no longer exists in Outline (or you lost access), so "${folder}" stopped syncing. Your files are untouched.`,
+				);
+				continue;
+			}
+			const synced = this.state.all().some((record) => record.collectionId === mapping.collectionId);
+			if (folder && synced && !this.app.vault.getAbstractFileByPath(normalizePath(folder))) {
+				dropped.push(mapping.collectionId);
+				this.hooks.onError(
+					`"${folder}" was deleted in Obsidian, so it stopped syncing with "${name}". Nothing was deleted in Outline.`,
+				);
+				continue;
+			}
+			live.push(mapping);
+		}
+		if (dropped.length > 0) {
+			this.settings.mappings = this.settings.mappings.filter((mapping) => !dropped.includes(mapping.collectionId));
+			for (const collectionId of dropped) this.state.forgetCollection(collectionId);
+			await this.persist();
+		}
+		return live;
+	}
+
 	/** Obsidian → Outline markdown, when conversion is enabled. */
 	private toOutline(text: string): string {
 		return this.settings.convertMarkdown ? encodeForOutline(text) : text;

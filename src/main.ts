@@ -1,8 +1,8 @@
-import { Notice, Plugin, TFile, debounce, setIcon, setTooltip } from "obsidian";
+import { Notice, Plugin, TFile, TFolder, debounce, normalizePath, setIcon, setTooltip } from "obsidian";
 
 import { OutlineClient } from "./outline/client";
 import { SyncEngine, type Conflict, type Resolution, type SyncDirection } from "./sync/engine";
-import { isInsideFolder, parentFolderOf } from "./sync/paths";
+import { isInsideFolder, parentFolderOf, renamedPath } from "./sync/paths";
 import { SyncStateStore, emptyState } from "./sync/state";
 import { DEFAULT_SETTINGS, type OutlineSyncSettings, type SyncState, type SyncSummary } from "./types";
 import { ConflictModal } from "./ui/conflict-modal";
@@ -28,6 +28,9 @@ export default class OutlineSyncPlugin extends Plugin {
 	private readonly pendingPushes = new Set<string>();
 	/** A folder move happened; the next flush must run a full sync to propagate it. */
 	private pendingFullSync = false;
+	/** Local notes deleted recently, by document id → title; handled after a short settle. */
+	private readonly pendingLocalDeletes = new Map<string, string>();
+	private localDeleteTimer?: number;
 	/** Serialises syncs so overlapping runs can't create duplicate documents. */
 	private syncing = false;
 	/** A sync asked for while another was running; it runs right after. */
@@ -232,6 +235,10 @@ export default class OutlineSyncPlugin extends Plugin {
 
 		this.registerEvent(
 			this.app.vault.on("rename", (file, oldPath) => {
+				if (file instanceof TFolder) {
+					this.followFolderRename(oldPath, file.path);
+					return;
+				}
 				if (!(file instanceof TFile)) return;
 				// Relocate the record even in manual mode, so the rename is not lost.
 				const record = this.state.relocate(oldPath, file.path);
@@ -252,13 +259,53 @@ export default class OutlineSyncPlugin extends Plugin {
 				if (!(file instanceof TFile)) return;
 				const record = this.state.byPath(file.path);
 				if (!record) return;
-				if (this.settings.propagateLocalDeletes) {
-					void this.deleteRemote(record.documentId, file.basename);
-				}
-				this.state.remove(record.documentId);
-				void this.savePersisted();
+				// Decide a moment later, once the vault has settled: a whole synced
+				// folder being deleted fires one event per note, and that must stop
+				// syncing the folder rather than delete every note in Outline.
+				this.pendingLocalDeletes.set(record.documentId, file.basename);
+				window.clearTimeout(this.localDeleteTimer);
+				this.localDeleteTimer = window.setTimeout(() => void this.processLocalDeletes(), 1500);
 			}),
 		);
+	}
+
+	/**
+	 * A folder was renamed or moved in Obsidian. Synced folders keep syncing under
+	 * their new name, and every note inside keeps its link to its document.
+	 */
+	private followFolderRename(oldPath: string, newPath: string): void {
+		let changed = this.state.relocateFolder(oldPath, newPath) > 0;
+		for (const mapping of this.settings.mappings) {
+			const next = renamedPath(mapping.folder, oldPath, newPath);
+			if (next !== undefined && next !== mapping.folder) {
+				mapping.folder = next;
+				changed = true;
+				new Notice(`Outline Sync: "${oldPath}" is now "${next}" — still synced with "${mapping.collectionName}".`);
+			}
+		}
+		if (changed) void this.savePersisted();
+	}
+
+	private async processLocalDeletes(): Promise<void> {
+		const pending = [...this.pendingLocalDeletes];
+		this.pendingLocalDeletes.clear();
+		let folderGone = false;
+		for (const [documentId, title] of pending) {
+			const record = this.state.get(documentId);
+			if (!record || this.app.vault.getAbstractFileByPath(record.path)) continue; // gone already, or back
+			const mapping = this.settings.mappings.find((candidate) => candidate.collectionId === record.collectionId);
+			const folder = mapping?.folder.replace(/^\/+|\/+$/g, "");
+			// The synced folder itself is gone: leave its records, so the next sync
+			// sees the folder disappear and stops syncing it without touching Outline.
+			if (folder && !this.app.vault.getAbstractFileByPath(normalizePath(folder))) {
+				folderGone = true;
+				continue;
+			}
+			if (this.settings.propagateLocalDeletes) await this.deleteRemote(documentId, title);
+			this.state.remove(documentId);
+		}
+		await this.savePersisted();
+		if (folderGone) void this.syncNow(true); // unlinks the folder now rather than at the next check
 	}
 
 	private async deleteRemote(documentId: string, title: string): Promise<void> {
@@ -388,6 +435,13 @@ export default class OutlineSyncPlugin extends Plugin {
 	private async loadPersisted(): Promise<void> {
 		const data = (await this.loadData()) as Partial<PersistedData> | null;
 		this.settings = { ...DEFAULT_SETTINGS, ...(data?.settings ?? {}) };
+		// 0.7.0 moved the push delay default from 3 s to 1 min. Move only people
+		// still on the old default; anyone who chose an interval keeps it.
+		if (data?.settings && (data.settings.settingsVersion ?? 0) < 1) {
+			if (this.settings.pushDebounceMs === 3000) this.settings.pushDebounceMs = 60_000;
+			this.settings.settingsVersion = 1;
+			await this.saveData({ settings: this.settings, state: data.state ?? emptyState() });
+		}
 		this.state = new SyncStateStore(data?.state);
 	}
 

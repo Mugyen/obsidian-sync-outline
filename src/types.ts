@@ -41,6 +41,8 @@ export interface OutlineSyncSettings {
 	 * Empty disables non-markdown sync.
 	 */
 	syncFileExtensions: string[];
+	/** Version of the stored settings, for one-time migrations when defaults change. */
+	settingsVersion: number;
 }
 
 export const DEFAULT_SETTINGS: OutlineSyncSettings = {
@@ -48,7 +50,7 @@ export const DEFAULT_SETTINGS: OutlineSyncSettings = {
 	apiToken: "",
 	mappings: [],
 	pollIntervalSeconds: 60,
-	pushDebounceMs: 3000,
+	pushDebounceMs: 60_000,
 	syncOnStartup: true,
 	conflictPolicy: "ask",
 	attachmentFolder: "Outline Attachments",
@@ -57,6 +59,7 @@ export const DEFAULT_SETTINGS: OutlineSyncSettings = {
 	propagateRemoteDeletes: true,
 	convertMarkdown: true,
 	syncFileExtensions: ["html"],
+	settingsVersion: 1,
 };
 
 /**

@@ -1,4 +1,5 @@
 import type { SyncRecord, SyncState } from "../types";
+import { renamedPath } from "./paths";
 
 export function emptyState(): SyncState {
 	return { version: 1, records: {} };
@@ -56,6 +57,26 @@ export class SyncStateStore {
 		if (!record) return undefined;
 		record.path = newPath;
 		return record;
+	}
+
+	/** Follows a renamed or moved folder: every record inside it gets the new path. */
+	relocateFolder(from: string, to: string): number {
+		let moved = 0;
+		for (const record of Object.values(this.state.records)) {
+			const next = renamedPath(record.path, from, to);
+			if (next !== undefined && next !== record.path) {
+				record.path = next;
+				moved++;
+			}
+		}
+		return moved;
+	}
+
+	/** Drops every record belonging to one collection (when it stops being synced). */
+	forgetCollection(collectionId: string): void {
+		for (const [id, record] of Object.entries(this.state.records)) {
+			if (record.collectionId === collectionId) delete this.state.records[id];
+		}
 	}
 
 	/** Drops records whose documents are no longer in a synced collection. */

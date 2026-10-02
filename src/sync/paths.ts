@@ -1,4 +1,4 @@
-import type { RemoteDocument } from "../types";
+import type { CollectionMapping, OutlineCollection, RemoteDocument } from "../types";
 
 /**
  * A folder in Obsidian has no content of its own, but Outline can only nest a
@@ -86,4 +86,54 @@ export function titleFromPath(path: string): string {
 /** Appends a suffix before the extension, e.g. "Note (conflict).md". */
 export function withSuffix(path: string, suffix: string): string {
 	return path.replace(/\.md$/, "") + suffix + ".md";
+}
+
+export interface LocalFolderPlan {
+	/** A top-level vault folder not yet synced. */
+	folder: string;
+	/** An unmapped Outline collection with the same name, to map instead of creating a duplicate. */
+	existing?: OutlineCollection;
+}
+
+/**
+ * Which top-level vault folders could become Outline collections. Folders that
+ * are already mapped, hidden (".obsidian"), or listed in `skip` are left out.
+ * A folder whose name matches an unmapped collection (ignoring case and stray
+ * spaces) is paired with it, so the user can map rather than duplicate.
+ */
+export function planLocalFolders(
+	topLevelFolders: string[],
+	collections: OutlineCollection[],
+	mappings: CollectionMapping[],
+	skip: string[],
+): LocalFolderPlan[] {
+	const key = (name: string) => name.trim().toLowerCase();
+	const strip = (path: string) => path.replace(/^\/+|\/+$/g, "");
+	const mappedFolders = new Set(mappings.map((mapping) => key(strip(mapping.folder))));
+	const mappedCollections = new Set(mappings.map((mapping) => mapping.collectionId));
+	const skipped = new Set(skip.map((folder) => key(strip(folder))));
+
+	return topLevelFolders
+		.filter((folder) => !folder.startsWith(".") && !skipped.has(key(folder)) && !mappedFolders.has(key(folder)))
+		.sort((a, b) => a.localeCompare(b))
+		.map((folder) => {
+			const existing = collections.find(
+				(collection) => !mappedCollections.has(collection.id) && key(collection.name) === key(folder),
+			);
+			return existing ? { folder, existing } : { folder };
+		});
+}
+
+/**
+ * Where `path` lives after the folder `from` was renamed or moved to `to`, or
+ * undefined when the rename doesn't touch it. Works for the folder itself and
+ * anything inside it.
+ */
+export function renamedPath(path: string, from: string, to: string): string | undefined {
+	const strip = (value: string) => value.replace(/^\/+|\/+$/g, "");
+	const [p, f, t] = [strip(path), strip(from), strip(to)];
+	if (!f) return undefined;
+	if (p === f) return t;
+	if (p.startsWith(`${f}/`)) return `${t}/${p.slice(f.length + 1)}`;
+	return undefined;
 }

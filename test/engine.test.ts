@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import type { OutlineClient } from "../src/outline/client";
 import { SyncEngine, type Conflict, type Resolution } from "../src/sync/engine";
 import { buildFileWrapper, hashBody, parseNote, withFrontmatter } from "../src/sync/markdown";
-import { FOLDER_MARKER, FOLDER_PLACEHOLDER_BODY } from "../src/sync/paths";
+import { FOLDER_MARKER, FOLDER_PLACEHOLDER_BODY, renamedPath } from "../src/sync/paths";
 import { SyncStateStore } from "../src/sync/state";
 import { DEFAULT_SETTINGS, type OutlineSyncSettings, type RemoteDocument } from "../src/types";
 import { FakeApp } from "./fake-vault";
@@ -33,8 +33,13 @@ class FakeClient {
 	get origin(): string {
 		return "https://outline.test";
 	}
+	readonly deletedCollections = new Set<string>();
+	async getCollection(id: string): Promise<{ id: string; urlId: string; name: string } | undefined> {
+		return this.deletedCollections.has(id) ? undefined : { id, urlId: id, name: id };
+	}
 	private readonly hiddenFromList = new Set<string>();
 	async listDocuments(collectionId: string): Promise<RemoteDocument[]> {
+		if (this.deletedCollections.has(collectionId)) throw new Error("403 authorization_error");
 		return this.documents.filter(
 			(document) => document.collectionId === collectionId && !this.hiddenFromList.has(document.id),
 		);
@@ -158,6 +163,7 @@ interface Harness {
 	engine: SyncEngine;
 	conflictsSeen: Conflict[];
 	answer: Resolution;
+	settings: OutlineSyncSettings;
 }
 
 function harness(documents: RemoteDocument[], overrides: Partial<OutlineSyncSettings> = {}): Harness {
@@ -178,6 +184,7 @@ function harness(documents: RemoteDocument[], overrides: Partial<OutlineSyncSett
 		state,
 		conflictsSeen: [],
 		answer: "skip",
+		settings,
 		engine: undefined as unknown as SyncEngine,
 	};
 
@@ -642,7 +649,7 @@ await test("the placeholder is never pulled into a local note, and is not recrea
 	const summary = await h.engine.syncAll(); // second pass
 
 	assert.equal(h.app.vault.files.has("Wiki/Team.md"), false, "no filler note appears locally");
-	assert.ok(h.app.vault.folders.has("Wiki/Team"), "the folder exists locally");
+	assert.ok(h.app.vault.getAbstractFileByPath("Wiki/Team") !== null, "the folder exists locally");
 	assert.equal(h.client.creates.filter((c) => c.title === "Team").length, 1, "placeholder not duplicated");
 	assert.equal(summary.conflicts, 0);
 });
@@ -915,6 +922,100 @@ await test("only allow-listed extensions sync; others are ignored", async () => 
 
 	assert.ok(h.client.creates.some((c) => c.title === "report.html"), "html synced");
 	assert.ok(!h.client.creates.some((c) => c.title === "photo.png"), "png ignored (not allow-listed)");
+});
+
+// ---- deleting or renaming a synced collection / folder ----
+
+await test("a collection deleted in Outline stops syncing; local files are untouched", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	await h.engine.syncAll();
+
+	h.client.deletedCollections.add("col");
+	const summary = await h.engine.syncAll();
+
+	assert.equal(h.settings.mappings.length, 0, "the folder <-> collection link is removed");
+	assert.ok(h.app.vault.files.has("Wiki/Oncall.md"), "the local note stays");
+	assert.equal(h.app.vault.trashed.length, 0, "nothing trashed");
+	assert.equal(h.state.all().length, 0, "tracking stopped");
+	assert.equal(summary.errors.length, 0, "no sync error");
+});
+
+await test("a synced folder deleted in Obsidian stops syncing; nothing is pulled back or deleted", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	await h.engine.syncAll();
+
+	h.app.vault.files.delete("Wiki/Oncall.md");
+	h.app.vault.folders.delete("Wiki");
+	const summary = await h.engine.syncAll();
+
+	assert.equal(h.settings.mappings.length, 0, "the link is removed");
+	assert.equal(summary.pulled, 0, "the folder is not re-downloaded");
+	assert.ok(!h.app.vault.files.has("Wiki/Oncall.md"));
+	assert.equal(h.client.deletes.length, 0, "nothing deleted in Outline");
+});
+
+await test("a newly switched-on collection whose folder doesn't exist yet still downloads", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	const summary = await h.engine.syncAll(); // no folder, no records yet
+	assert.equal(h.settings.mappings.length, 1);
+	assert.equal(summary.pulled, 1);
+});
+
+await test("a synced folder renamed in Obsidian keeps syncing under the new name", async () => {
+	const h = harness([remoteDoc("d1", "Oncall", "Rotation")]);
+	await h.engine.syncAll();
+
+	// What the plugin does on Obsidian's folder-rename event:
+	const content = h.app.vault.files.get("Wiki/Oncall.md")!;
+	h.app.vault.files.delete("Wiki/Oncall.md");
+	h.app.vault.folders.delete("Wiki");
+	h.app.vault.folders.add("Team Wiki");
+	h.app.vault.seed("Team Wiki/Oncall.md", content);
+	h.settings.mappings[0].folder = renamedPath(h.settings.mappings[0].folder, "Wiki", "Team Wiki")!;
+	h.state.relocateFolder("Wiki", "Team Wiki");
+
+	const summary = await h.engine.syncAll();
+
+	assert.equal(h.settings.mappings[0].folder, "Team Wiki", "still linked, under the new name");
+	assert.equal(summary.pulled + summary.pushed + summary.created, 0, "nothing to do");
+	assert.ok(!h.app.vault.files.has("Wiki/Oncall.md"), "not re-downloaded under the old name");
+});
+
+await test("a subfolder renamed in Obsidian renames its folder document in Outline", async () => {
+	const sub = remoteDoc("sub", "Sub", FOLDER_PLACEHOLDER_BODY);
+	const note: RemoteDocument = { ...remoteDoc("d1", "Note", "body"), parentDocumentId: "sub" };
+	const h = harness([sub, note]);
+	await h.engine.syncAll(); // Wiki/Sub/Note.md
+
+	const content = h.app.vault.files.get("Wiki/Sub/Note.md")!;
+	h.app.vault.files.delete("Wiki/Sub/Note.md");
+	h.app.vault.folders.delete("Wiki/Sub");
+	h.app.vault.folders.add("Wiki/Renamed");
+	h.app.vault.seed("Wiki/Renamed/Note.md", content);
+	h.state.relocateFolder("Wiki/Sub", "Wiki/Renamed");
+
+	await h.engine.syncAll();
+
+	assert.ok(h.client.updates.some((u) => u.id === "sub" && u.title === "Renamed"), "folder doc renamed in Outline");
+	assert.equal(h.client.creates.length, 0, "no new folder document created");
+	assert.equal(h.client.moves.length, 0, "the note isn't moved");
+	assert.ok(!h.app.vault.folders.has("Wiki/Sub"), "old folder not recreated locally");
+});
+
+await test("a folder document renamed in Outline is not renamed back", async () => {
+	const sub = remoteDoc("sub", "Sub", FOLDER_PLACEHOLDER_BODY);
+	const note: RemoteDocument = { ...remoteDoc("d1", "Note", "body"), parentDocumentId: "sub" };
+	const h = harness([sub, note]);
+	await h.engine.syncAll();
+
+	h.client.documents.find((d) => d.id === "sub")!.title = "Outline Name";
+	await h.engine.syncAll();
+
+	assert.ok(!h.client.updates.some((u) => u.id === "sub"), "Outline's new name is left alone");
+	assert.ok(h.app.vault.files.has("Wiki/Outline Name/Note.md"), "the note follows it locally");
+	assert.equal(h.client.creates.length, 0, "no duplicate folder document created");
+	assert.equal(h.client.moves.length, 0, "the note isn't moved in Outline");
+	assert.equal(h.app.vault.getAbstractFileByPath("Wiki/Sub"), null, "old local folder renamed, not left behind");
 });
 
 for (const failure of failures) console.error(failure);

@@ -108,3 +108,26 @@
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
 }
+
+/* ---- "How sync works" panel ---- */
+
+.outline-sync-info {
+	max-width: 44rem;
+	width: 90vw;
+}
+
+.outline-sync-cases {
+	padding-left: 1.1rem;
+	margin: 0;
+}
+
+.outline-sync-cases li {
+	margin-bottom: 0.65rem;
+	line-height: 1.5;
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+}
+
+.outline-sync-cases strong {
+	color: var(--text-normal);
+}

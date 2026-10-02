@@ -17,7 +17,7 @@ import {
 	rewriteImageToOutline,
 	withFrontmatter,
 } from "../src/sync/markdown";
-import { pathForDocument, safeFileName, titleFromPath, withSuffix } from "../src/sync/paths";
+import { pathForDocument, planLocalFolders, renamedPath, safeFileName, titleFromPath, withSuffix } from "../src/sync/paths";
 import type { RemoteDocument } from "../src/types";
 
 let passed = 0;
@@ -308,6 +308,52 @@ test("real paragraph breaks are preserved through the round-trip", () => {
 	const original = "first para line a\nfirst para line b\n\nsecond para";
 	const restored = decodeFromOutline(simulateOutlineStore(encodeForOutline(original)));
 	assert.equal(restored, original);
+});
+
+// ---------- local folders → Outline collections ----------
+
+const col = (id: string, name: string) => ({ id, urlId: id, name });
+
+test("unmapped top-level folders are offered; mapped ones are not", () => {
+	const plan = planLocalFolders(
+		["Team Sync", "Saksham's Research", "Inbox"],
+		[col("c1", "Vedant's Vault"), col("c2", "Saksham's Research")],
+		[{ collectionId: "c1", collectionName: "Vedant's Vault", folder: "Team Sync" }],
+		[],
+	);
+	assert.deepEqual(plan, [
+		{ folder: "Inbox" },
+		{ folder: "Saksham's Research", existing: col("c2", "Saksham's Research") },
+	]);
+});
+
+test("a same-named collection matches regardless of case and stray spaces", () => {
+	const plan = planLocalFolders(["research"], [col("c9", " Research ")], [], []);
+	assert.equal(plan[0].existing?.id, "c9");
+});
+
+test("a same-named collection already mapped elsewhere is not offered for mapping", () => {
+	const plan = planLocalFolders(
+		["Notes"],
+		[col("c1", "Notes")],
+		[{ collectionId: "c1", collectionName: "Notes", folder: "Old Notes" }],
+		[],
+	);
+	assert.deepEqual(plan, [{ folder: "Notes" }]);
+});
+
+test("hidden folders and skipped folders (attachments) are never offered", () => {
+	const plan = planLocalFolders([".obsidian", ".trash", "Outline Attachments", "Ideas"], [], [], [
+		"Outline Attachments",
+	]);
+	assert.deepEqual(plan, [{ folder: "Ideas" }]);
+});
+
+test("renamedPath follows a folder rename for the folder and anything inside it", () => {
+	assert.equal(renamedPath("Wiki", "Wiki", "Team Wiki"), "Team Wiki");
+	assert.equal(renamedPath("Wiki/Sub/Note.md", "Wiki", "Team Wiki"), "Team Wiki/Sub/Note.md");
+	assert.equal(renamedPath("Wikipedia/Note.md", "Wiki", "Team Wiki"), undefined, "only whole folder names");
+	assert.equal(renamedPath("Other/Note.md", "Wiki", "Team Wiki"), undefined);
 });
 
 console.log(`${passed} passed${process.exitCode ? "" : ", 0 failed"}`);

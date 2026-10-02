@@ -121,6 +121,36 @@ export class OutlineClient {
 		return documents;
 	}
 
+	/**
+	 * The collection, or undefined when it is gone for us: deleted (404), no
+	 * longer accessible (403), or archived. Network and server errors still throw,
+	 * so a flaky connection is never mistaken for a deletion.
+	 */
+	async getCollection(id: string): Promise<OutlineCollection | undefined> {
+		try {
+			const result = await this.post<{
+				data: OutlineCollection & { deletedAt?: string | null; archivedAt?: string | null };
+			}>("collections.info", { id });
+			if (result.data.deletedAt || result.data.archivedAt) return undefined;
+			return { id: result.data.id, urlId: result.data.urlId, name: result.data.name };
+		} catch (error) {
+			if (error instanceof OutlineApiError && (error.status === 404 || error.status === 403)) return undefined;
+			throw error;
+		}
+	}
+
+	/**
+	 * Creates a collection. Workspace collections are readable and editable by
+	 * every member; private ones (permission null) only by their creator.
+	 */
+	async createCollection(params: { name: string; private: boolean }): Promise<OutlineCollection> {
+		const result = await this.post<{ data: OutlineCollection }>("collections.create", {
+			name: params.name,
+			permission: params.private ? null : "read_write",
+		});
+		return { id: result.data.id, urlId: result.data.urlId, name: result.data.name };
+	}
+
 	async getDocument(id: string): Promise<RemoteDocument | undefined> {
 		try {
 			const result = await this.post<{ data: RawDocument }>("documents.info", { id });

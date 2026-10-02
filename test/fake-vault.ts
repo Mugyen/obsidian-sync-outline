@@ -36,6 +36,9 @@ export class FakeVault {
 	}
 	getAbstractFileByPath(path: string): TFile | { path: string } | null {
 		if (this.folders.has(path)) return { path };
+		// Like a real vault, a folder exists while anything lives inside it.
+		const inside = (key: string) => key.startsWith(`${path}/`);
+		if ([...this.files.keys(), ...this.binaries.keys()].some(inside)) return { path };
 		return this.getFileByPath(path);
 	}
 	async read(file: TFile): Promise<string> {
@@ -68,11 +71,24 @@ export class FakeVault {
 export class FakeApp {
 	readonly vault = new FakeVault();
 	readonly fileManager = {
-		renameFile: async (file: TFile, newPath: string): Promise<void> => {
-			const content = this.vault.files.get(file.path);
-			if (content === undefined) return;
-			this.vault.files.delete(file.path);
-			this.vault.files.set(newPath, content);
+		renameFile: async (file: TFile | { path: string }, newPath: string): Promise<void> => {
+			const from = file.path;
+			const move = (key: string) => (key === from ? newPath : key.startsWith(`${from}/`) ? newPath + key.slice(from.length) : undefined);
+			// Works for a single file and for a folder with everything inside it.
+			for (const store of [this.vault.files, this.vault.binaries] as Map<string, unknown>[]) {
+				for (const [key, value] of [...store]) {
+					const target = move(key);
+					if (target === undefined) continue;
+					store.delete(key);
+					store.set(target, value);
+				}
+			}
+			for (const folder of [...this.vault.folders]) {
+				const target = move(folder);
+				if (target === undefined) continue;
+				this.vault.folders.delete(folder);
+				this.vault.folders.add(target);
+			}
 		},
 		trashFile: async (file: TFile): Promise<void> => {
 			this.vault.files.delete(file.path);

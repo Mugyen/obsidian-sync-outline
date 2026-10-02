@@ -1,8 +1,11 @@
-import { Notice, PluginSettingTab, Setting, type App } from "obsidian";
+import { Notice, PluginSettingTab, Setting, TFolder, type App } from "obsidian";
 
 import { OutlineClient } from "../outline/client";
 import type OutlineSyncPlugin from "../main";
+import { isInsideFolder, planLocalFolders } from "../sync/paths";
 import type { ConflictPolicy, OutlineCollection } from "../types";
+import { FolderConfirmModal } from "./folder-confirm-modal";
+import { HowItWorksModal } from "./how-it-works-modal";
 
 export class OutlineSyncSettingTab extends PluginSettingTab {
 	private collections: OutlineCollection[] = [];
@@ -18,12 +21,14 @@ export class OutlineSyncSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 
-		const version = new Setting(containerEl)
+		const about = new Setting(containerEl)
 			.setName("Outline Sync")
-			.setDesc(`Version ${this.plugin.manifest.version}`);
-		version.descEl.createEl("br");
-		version.descEl.createEl("a", {
-			text: "Check for the latest release",
+			.setDesc(`Version ${this.plugin.manifest.version} · Syncs one Outline collection with one vault folder. `)
+			.addButton((button) =>
+				button.setButtonText("How sync works").setCta().onClick(() => new HowItWorksModal(this.app).open()),
+			);
+		about.descEl.createEl("a", {
+			text: "Latest release",
 			href: "https://github.com/Mugyen/obsidian-sync-outline/releases/latest",
 		});
 
@@ -151,6 +156,8 @@ export class OutlineSyncSettingTab extends PluginSettingTab {
 				}),
 			);
 		}
+
+		if (this.collections.length > 0) this.displayLocalFolders(containerEl);
 
 		new Setting(containerEl).setName("Syncing").setHeading();
 
@@ -320,5 +327,66 @@ export class OutlineSyncSettingTab extends PluginSettingTab {
 						new Notice("Sync state cleared.");
 					}),
 			);
+	}
+
+	/** Top-level vault folders that aren't synced yet, each offered as a collection. */
+	private displayLocalFolders(containerEl: HTMLElement): void {
+		const settings = this.plugin.settings;
+		const topLevel = this.app.vault
+			.getRoot()
+			.children.filter((child): child is TFolder => child instanceof TFolder)
+			.map((folder) => folder.name);
+		const plan = planLocalFolders(topLevel, this.collections, settings.mappings, [settings.attachmentFolder]);
+
+		new Setting(containerEl).setName("Vault folders not in Outline").setHeading();
+		containerEl.createEl("p", {
+			cls: "setting-item-description",
+			text:
+				plan.length === 0
+					? "Every top-level folder in this vault is already synced."
+					: "Turn a top-level folder into an Outline collection. Its notes, subfolders and allow-listed files upload on the next sync.",
+		});
+
+		const extensions = new Set(settings.syncFileExtensions.map((e) => e.toLowerCase()));
+		for (const { folder, existing } of plan) {
+			const inside = this.app.vault.getFiles().filter((file) => isInsideFolder(file.path, folder));
+			const notes = inside.filter((file) => file.extension === "md").length;
+			const files = inside.filter((file) => extensions.has(file.extension.toLowerCase())).length;
+			const counts = `${notes} note${notes === 1 ? "" : "s"}${files ? `, ${files} file${files === 1 ? "" : "s"}` : ""}`;
+
+			new Setting(containerEl)
+				.setName(folder)
+				.setDesc(existing ? `${counts} · Outline already has a collection named "${existing.name}"` : counts)
+				.addButton((button) =>
+					button.setButtonText(existing ? "Sync with existing" : "Create collection").onClick(async () => {
+						const choice = await new FolderConfirmModal(this.app, {
+							folder,
+							notes,
+							files,
+							existing: existing?.name,
+							uploadsNewNotes: settings.createRemoteForNewFiles,
+						}).openAndWait();
+						if (choice === "cancel") return;
+
+						button.setDisabled(true).setButtonText(existing ? "Linking…" : "Creating…");
+						try {
+							let collection = existing;
+							if (!collection) {
+								const client = new OutlineClient(settings.baseUrl, settings.apiToken);
+								collection = await client.createCollection({ name: folder, private: choice === "private" });
+								this.collections.push(collection);
+							}
+							settings.mappings.push({ collectionId: collection.id, collectionName: collection.name, folder });
+							await this.plugin.saveSettings();
+							new Notice(`Outline Sync: "${folder}" is now synced with "${collection.name}". Uploading…`);
+							this.display();
+							void this.plugin.syncNow();
+						} catch (error) {
+							new Notice(`Could not set up "${folder}": ${String(error)}`, 10_000);
+							button.setDisabled(false).setButtonText(existing ? "Sync with existing" : "Create collection");
+						}
+					}),
+				);
+		}
 	}
 }
