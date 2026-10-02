@@ -2,6 +2,8 @@
 
 The *why* behind the code: decisions, the Outline behaviour they rest on, and the traps already hit. What the code does is in the code; user-facing docs are README, USAGE and the in-app **How sync works** panel (keep that panel in step with §2).
 
+> **Keep this file current.** Every version bump adds a line to §6 (what changed and why) before release. Every significant decision or newly verified Outline quirk is recorded here, with its reason, in the same change.
+
 ---
 
 ## 1. Ground rules
