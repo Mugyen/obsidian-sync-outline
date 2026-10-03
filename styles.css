@@ -131,3 +131,16 @@
 .outline-sync-cases strong {
 	color: var(--text-normal);
 }
+
+/* ---- "Show more" popup for long folder/collection lists ---- */
+
+.outline-sync-more {
+	max-width: 40rem;
+	width: 90vw;
+}
+
+.outline-sync-count {
+	margin-top: -0.4rem;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}

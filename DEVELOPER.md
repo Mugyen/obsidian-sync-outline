@@ -52,6 +52,8 @@ Outline's `revision` lags editor edits (Q6), and a timestamp can't tell *my* edi
 
 **Timing defaults: check every 10 s, push 10 s after typing stops** (user decision). Changed defaults reach existing installs only through the `settingsVersion` migration, which moves users still on an old default and leaves custom intervals alone.
 
+**Settings lists show two rows, the rest in a "Show more" popup.** Workspaces and vaults grew until the collection and vault-folder lists pushed every other setting off-screen. Synced collections come first because they're the ones you manage; among unsynced vault folders, ones that can link to an existing collection come first. In the popup a flipped toggle re-renders in place rather than re-sorting, so the row doesn't jump away mid-interaction; the popup shows synced-of-total (collections) or the total unsynced (folders) so the hidden count is never a guess.
+
 **`?`, `*`, `:` … in titles become `-` in filenames.** Filesystem limit; the user accepted it as long as no words are lost.
 
 ---
@@ -107,3 +109,4 @@ When a new quirk is found, reproduce it in `test/` fakes (as `FakeClient.storeTe
 - **0.6.x** Attachment files; link padding (Q9) caused duplicates → name in marker; sync lock; trashed docs (Q5) blocked deletions; Obsidian-native lists (Q4); queued clicks.
 - **0.7.0** Folders → collections; delete/rename of folders and collections never cross-deletes; Outline-side folder rename no longer duplicates; How sync works panel.
 - **0.7.1** 10 s defaults.
+- **0.7.2** Long settings lists capped at two rows + "Show more" popup with counts.

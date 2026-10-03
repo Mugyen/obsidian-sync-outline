@@ -2,10 +2,14 @@ import { Notice, PluginSettingTab, Setting, TFolder, type App } from "obsidian";
 
 import { OutlineClient } from "../outline/client";
 import type OutlineSyncPlugin from "../main";
-import { isInsideFolder, planLocalFolders } from "../sync/paths";
+import { isInsideFolder, planLocalFolders, type LocalFolderPlan } from "../sync/paths";
 import type { ConflictPolicy, OutlineCollection } from "../types";
 import { FolderConfirmModal } from "./folder-confirm-modal";
 import { HowItWorksModal } from "./how-it-works-modal";
+import { MoreModal } from "./more-modal";
+
+/** Rows shown inline per list; the rest open in a "Show more" popup. */
+const VISIBLE_ROWS = 2;
 
 export class OutlineSyncSettingTab extends PluginSettingTab {
 	private collections: OutlineCollection[] = [];
@@ -118,43 +122,32 @@ export class OutlineSyncSettingTab extends PluginSettingTab {
 			}
 		}
 
-		for (const collection of this.collections) {
-			const mapping = this.plugin.settings.mappings.find(
-				(candidate) => candidate.collectionId === collection.id,
-			);
-
-			const setting = new Setting(containerEl).setName(collection.name);
-			setting.addText((text) =>
-				text
-					.setPlaceholder("Vault folder")
-					.setValue(mapping?.folder ?? collection.name)
-					.setDisabled(!mapping)
-					.onChange(async (value) => {
-						const current = this.plugin.settings.mappings.find(
-							(candidate) => candidate.collectionId === collection.id,
-						);
-						if (!current) return;
-						current.folder = value.trim().replace(/^\/+|\/+$/g, "");
-						await this.plugin.saveSettings();
-					}),
-			);
-			setting.addToggle((toggle) =>
-				toggle.setValue(Boolean(mapping)).onChange(async (enabled) => {
-					if (enabled) {
-						this.plugin.settings.mappings.push({
-							collectionId: collection.id,
-							collectionName: collection.name,
-							folder: collection.name,
-						});
-					} else {
-						this.plugin.settings.mappings = this.plugin.settings.mappings.filter(
-							(candidate) => candidate.collectionId !== collection.id,
-						);
-					}
-					await this.plugin.saveSettings();
-					this.display();
-				}),
-			);
+		// Synced collections first; the rest behind "Show more" so a growing
+		// workspace doesn't bury the settings below.
+		const mapped = new Set(this.plugin.settings.mappings.map((mapping) => mapping.collectionId));
+		const collections = [...this.collections].sort(
+			(a, b) => Number(mapped.has(b.id)) - Number(mapped.has(a.id)) || a.name.localeCompare(b.name),
+		);
+		for (const collection of collections.slice(0, VISIBLE_ROWS)) {
+			this.collectionRow(containerEl, collection, () => this.display());
+		}
+		const moreCollections = collections.slice(VISIBLE_ROWS);
+		if (moreCollections.length > 0) {
+			this.showMoreButton(containerEl, moreCollections.length, "All collections", (list, modal) => {
+				const synced = this.collections.filter((collection) =>
+					this.plugin.settings.mappings.some((mapping) => mapping.collectionId === collection.id),
+				).length;
+				list.createEl("p", {
+					cls: "outline-sync-count",
+					text: `${synced} of ${this.collections.length} collections synced`,
+				});
+				for (const collection of moreCollections) {
+					this.collectionRow(list, collection, () => {
+						this.display();
+						modal.rerender();
+					});
+				}
+			});
 		}
 
 		if (this.collections.length > 0) this.displayLocalFolders(containerEl);
@@ -348,46 +341,112 @@ export class OutlineSyncSettingTab extends PluginSettingTab {
 					: "Turn a top-level folder into an Outline collection. Its notes, subfolders and allow-listed files upload on the next sync.",
 		});
 
-		const extensions = new Set(settings.syncFileExtensions.map((e) => e.toLowerCase()));
-		for (const { folder, existing } of plan) {
-			const inside = this.app.vault.getFiles().filter((file) => isInsideFolder(file.path, folder));
-			const notes = inside.filter((file) => file.extension === "md").length;
-			const files = inside.filter((file) => extensions.has(file.extension.toLowerCase())).length;
-			const counts = `${notes} note${notes === 1 ? "" : "s"}${files ? `, ${files} file${files === 1 ? "" : "s"}` : ""}`;
-
-			new Setting(containerEl)
-				.setName(folder)
-				.setDesc(existing ? `${counts} · Outline already has a collection named "${existing.name}"` : counts)
-				.addButton((button) =>
-					button.setButtonText(existing ? "Sync with existing" : "Create collection").onClick(async () => {
-						const choice = await new FolderConfirmModal(this.app, {
-							folder,
-							notes,
-							files,
-							existing: existing?.name,
-							uploadsNewNotes: settings.createRemoteForNewFiles,
-						}).openAndWait();
-						if (choice === "cancel") return;
-
-						button.setDisabled(true).setButtonText(existing ? "Linking…" : "Creating…");
-						try {
-							let collection = existing;
-							if (!collection) {
-								const client = new OutlineClient(settings.baseUrl, settings.apiToken);
-								collection = await client.createCollection({ name: folder, private: choice === "private" });
-								this.collections.push(collection);
-							}
-							settings.mappings.push({ collectionId: collection.id, collectionName: collection.name, folder });
-							await this.plugin.saveSettings();
-							new Notice(`Outline Sync: "${folder}" is now synced with "${collection.name}". Uploading…`);
-							this.display();
-							void this.plugin.syncNow();
-						} catch (error) {
-							new Notice(`Could not set up "${folder}": ${String(error)}`, 10_000);
-							button.setDisabled(false).setButtonText(existing ? "Sync with existing" : "Create collection");
-						}
-					}),
-				);
+		// Folders that can link to an existing collection first, then by name.
+		const ordered = [...plan].sort((a, b) => Number(Boolean(b.existing)) - Number(Boolean(a.existing)));
+		for (const item of ordered.slice(0, VISIBLE_ROWS)) this.localFolderRow(containerEl, item);
+		const moreFolders = ordered.slice(VISIBLE_ROWS);
+		if (moreFolders.length > 0) {
+			this.showMoreButton(containerEl, moreFolders.length, "All vault folders not in Outline", (list, modal) => {
+				list.createEl("p", {
+					cls: "outline-sync-count",
+					text: `${plan.length} folder${plan.length === 1 ? "" : "s"} not in Outline`,
+				});
+				for (const item of moreFolders) this.localFolderRow(list, item, () => modal.close());
+			});
 		}
+	}
+
+	/** One collection: its vault folder and an on/off toggle. */
+	private collectionRow(container: HTMLElement, collection: OutlineCollection, refresh: () => void): void {
+		const mapping = this.plugin.settings.mappings.find((candidate) => candidate.collectionId === collection.id);
+		const setting = new Setting(container).setName(collection.name);
+		setting.addText((text) =>
+			text
+				.setPlaceholder("Vault folder")
+				.setValue(mapping?.folder ?? collection.name)
+				.setDisabled(!mapping)
+				.onChange(async (value) => {
+					const current = this.plugin.settings.mappings.find(
+						(candidate) => candidate.collectionId === collection.id,
+					);
+					if (!current) return;
+					current.folder = value.trim().replace(/^\/+|\/+$/g, "");
+					await this.plugin.saveSettings();
+				}),
+		);
+		setting.addToggle((toggle) =>
+			toggle.setValue(Boolean(mapping)).onChange(async (enabled) => {
+				if (enabled) {
+					this.plugin.settings.mappings.push({
+						collectionId: collection.id,
+						collectionName: collection.name,
+						folder: collection.name,
+					});
+				} else {
+					this.plugin.settings.mappings = this.plugin.settings.mappings.filter(
+						(candidate) => candidate.collectionId !== collection.id,
+					);
+				}
+				await this.plugin.saveSettings();
+				refresh();
+			}),
+		);
+	}
+
+	private showMoreButton(
+		container: HTMLElement,
+		count: number,
+		heading: string,
+		render: (list: HTMLElement, modal: MoreModal) => void,
+	): void {
+		new Setting(container).addButton((button) =>
+			button.setButtonText(`+ Show ${count} more`).onClick(() => new MoreModal(this.app, heading, render).open()),
+		);
+	}
+
+	/** One unsynced vault folder with "Create collection" / "Sync with existing". */
+	private localFolderRow(container: HTMLElement, plan: LocalFolderPlan, afterLinked?: () => void): void {
+		const settings = this.plugin.settings;
+		const { folder, existing } = plan;
+		const extensions = new Set(settings.syncFileExtensions.map((e) => e.toLowerCase()));
+		const inside = this.app.vault.getFiles().filter((file) => isInsideFolder(file.path, folder));
+		const notes = inside.filter((file) => file.extension === "md").length;
+		const files = inside.filter((file) => extensions.has(file.extension.toLowerCase())).length;
+		const counts = `${notes} note${notes === 1 ? "" : "s"}${files ? `, ${files} file${files === 1 ? "" : "s"}` : ""}`;
+
+		new Setting(container)
+			.setName(folder)
+			.setDesc(existing ? `${counts} · Outline already has a collection named "${existing.name}"` : counts)
+			.addButton((button) =>
+				button.setButtonText(existing ? "Sync with existing" : "Create collection").onClick(async () => {
+					const choice = await new FolderConfirmModal(this.app, {
+						folder,
+						notes,
+						files,
+						existing: existing?.name,
+						uploadsNewNotes: settings.createRemoteForNewFiles,
+					}).openAndWait();
+					if (choice === "cancel") return;
+
+					button.setDisabled(true).setButtonText(existing ? "Linking…" : "Creating…");
+					try {
+						let collection = existing;
+						if (!collection) {
+							const client = new OutlineClient(settings.baseUrl, settings.apiToken);
+							collection = await client.createCollection({ name: folder, private: choice === "private" });
+							this.collections.push(collection);
+						}
+						settings.mappings.push({ collectionId: collection.id, collectionName: collection.name, folder });
+						await this.plugin.saveSettings();
+						new Notice(`Outline Sync: "${folder}" is now synced with "${collection.name}". Uploading…`);
+						afterLinked?.();
+						this.display();
+						void this.plugin.syncNow();
+					} catch (error) {
+						new Notice(`Could not set up "${folder}": ${String(error)}`, 10_000);
+						button.setDisabled(false).setButtonText(existing ? "Sync with existing" : "Create collection");
+					}
+				}),
+			);
 	}
 }
